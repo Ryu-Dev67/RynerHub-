@@ -1,7 +1,8 @@
---[[ Oxio Hub - Steal Eggs + Anti Guard (v2)
-     - Auto Steal dengan filter value + scale
-     - Anti Guard full dengan disguise + limp + drag
-     - Karakter gak mati mid-journey (handle ragdoll)
+--[[ Oxio Hub - Steal Eggs + Anti Guard (fixed)
+     - Karakter gak mati mid-journey
+     - Anti Guard anchor root + hide parts
+     - Min Value + Min Scale + Travel Method
+     - Panel draggable, outline putih, logo baru
 ]]
 
 local function P(...) print("[Oxio]", ...) end
@@ -296,10 +297,10 @@ end
 
 -- ===== CORE =====
 r247 = {
-    Steal = { Active = false, Carrying = false, LastFinishedAt = 0 },
-    SafeCarry = { Enabled = true, CarryScale = 1, RunSpeed = 1.15, Height = 70, SlowUntil = 0, SlowFactor = 0.3 },
+    Steal = { Active = false, Carrying = false, LastFinishedAt = 0, _lastCarry = false },
+    SafeCarry = { Enabled = true, CarryScale = 1, RunSpeed = 1.15, Height = 70 },
     Movement = { Owner = nil, StealFirst = false },
-    AntiGuard = { Enabled = false, Busy = false, BusySince = 0, HitArms = 0, HitArmedAt = 0, Handle = nil, PanelShown = true, ShowPanel = nil, Render = nil },
+    AntiGuard = { Enabled = false, Busy = false, BusySince = 0, Handle = nil, PanelShown = true, ShowPanel = nil, Render = nil },
     Flying = false,
 }
 r247.Toggle = function(h, d)
@@ -361,6 +362,7 @@ r247.InsideBase = function(pos)
     local s = a and a:FindFirstChild("SeparationLine")
     return pos.X < (s and s:IsA("BasePart") and s.Position.X or 552)
 end
+r247.UiDefer = function(fn) task.defer(fn) end
 
 -- ===== RARITY / AREA =====
 local PRIORITY = { "Best Rarity", "Biggest Weight", "Best Mutation", "Highest Value", "Lowest Value" }
@@ -461,23 +463,21 @@ sec:CreateMultiDropdown({
 })
 P("rarities done")
 
--- Min Value slider (pakai raw number 0 - 1000, itu udah cukup buat skala income)
 sec:CreateSlider({
     Name = "Min Steal Value",
-    Note = "Skip egg yang value nya di bawah ini (0 = off)",
+    Note = "Skip egg dengan value di bawah ini (0 = off)",
     Min = 0, Max = 1000000000000, Default = 0, Increment = 1000000,
     Callback = function(v) minValue = math.max(0, tonumber(v) or 0) end,
 })
-P("min value slider done")
+P("min value done")
 
--- Min Scale / Big eggs
 sec:CreateSlider({
     Name = "Min Egg Scale",
-    Note = "Skip egg yang size nya di bawah ini (0 = off, 2.0 = big eggs only)",
+    Note = "0 = off, 2.0 = big eggs only",
     Min = 0, Max = 30, Default = 0, Increment = 0.1,
     Callback = function(v) minScale = math.max(0, tonumber(v) or 0) end,
 })
-P("min scale slider done")
+P("min scale done")
 
 sec:CreateDropdown({
     Name = "Priority",
@@ -500,7 +500,7 @@ sec:CreateDropdown({
     Default = "Tween",
     Callback = function(v) travelMethod = tostring(v or "Tween") end,
 })
-P("travel method done")
+P("travel done")
 
 sec:CreateSlider({
     Name = "Carry Speed",
@@ -550,17 +550,6 @@ panelToggle = agSec:CreateToggle({
 })
 P("panel toggle done")
 
-local swapToggle
-swapToggle = agSec:CreateToggle({
-    Name = "Hide Character",
-    Note = "Sembunyikan karakter saat Anti Guard aktif",
-    Default = true,
-    Callback = function(v)
-        r247.AntiGuard.HideChar = v ~= false
-    end,
-})
-P("hide char toggle done")
-
 agSec:CreateLabel({ Text = "Klik panel bawah = toggle" })
 agSec:CreateLabel({ Text = "Tahan + geser = pindah posisi" })
 P("ag labels done")
@@ -606,14 +595,6 @@ do
         return 1
     end
 
-    local function computeValue(rec)
-        local info = meta(rec.AssetCategory)
-        local scale = tonumber(rec.AssetScale) or 1
-        local mm = mutMult(rec.Mutations)
-        local factor = scale > 5 and (scale/5)^1.2 * 19.637875755794113 or scale^1.85
-        return info.EarningRate * factor * mm, info.Rarity, scale
-    end
-
     local function pickEgg()
         local recs = readRecs()
         if type(recs) ~= "table" then return nil end
@@ -623,15 +604,15 @@ do
             local state = rec.State
             if uid and (state == "Slot" or state == "Dropped") and typeof(rec.BottomCFrame) == "CFrame" then
                 if targetAreas[tostring(rec.AreaId)] and (cooldownEggs[uid] or 0) <= os.clock() then
-                    local value, rar, scale = computeValue(rec)
-                    local areaOK = targetAreas[tostring(rec.AreaId)] == true
-                    local rarOK = rar >= minRarity
-                    local valOK = minValue <= 0 or value >= minValue
-                    local scaleOK = minScale <= 0 or scale >= minScale
-                    if areaOK and rarOK and valOK and scaleOK then
+                    local info = meta(rec.AssetCategory)
+                    local scale = tonumber(rec.AssetScale) or 1
+                    local mm = mutMult(rec.Mutations)
+                    local factor = scale > 5 and (scale/5)^1.2 * 19.637875755794113 or scale^1.85
+                    local value = info.EarningRate * factor * mm
+                    if info.Rarity >= minRarity and (minValue <= 0 or value >= minValue) and (minScale <= 0 or scale >= minScale) then
                         local score
                         if priorityMode == PRIORITY[2] then score = scale
-                        elseif priorityMode == PRIORITY[3] then score = mutMult(rec.Mutations)
+                        elseif priorityMode == PRIORITY[3] then score = mm
                         elseif priorityMode == PRIORITY[5] then score = -value
                         else score = value end
                         if not best or score > bestScore then
@@ -659,18 +640,30 @@ do
         return Vector3.new(528.7, 70.57, -364.11)
     end
 
-    -- flyTo with ragdoll handling
+    local function ensureAlive()
+        local hm = r247.Humanoid()
+        if not hm then return false end
+        pcall(function()
+            if hm.BreakJointsOnDeath then hm.BreakJointsOnDeath = false end
+            if hm.RequiresNeck then hm.RequiresNeck = false end
+            hm:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+        end)
+        if hm.Health < hm.MaxHealth then
+            pcall(function() hm.Health = hm.MaxHealth end)
+        end
+        return hm.Health > 0
+    end
+
     local function flyTo(target, needCarry)
+        local char = r232.Character
         local r = r247.Root()
         if not r then return false end
         local startPos = r.Position
-        local char = r232.Character
         local done, elapsed = nil, 0
         local c = r137.Heartbeat:Connect(function(dt)
             if done ~= nil then return end
-            elapsed = elapsed + dt
-            if elapsed >= 25 or r232.Character ~= char then done = false; return end
-            -- ragdoll: pause movement, wait
+            if r232.Character ~= char then done = false; return end
+            ensureAlive()
             if r247.Ragdolled() then
                 pcall(function()
                     r.AssemblyLinearVelocity = Vector3.zero
@@ -678,9 +671,12 @@ do
                 end)
                 return
             end
+            elapsed = elapsed + dt
+            if elapsed >= 30 then done = false; return end
             if needCarry and not r247.Steal.Carrying then done = false; return end
             local cur = r247.Root()
             if not cur then done = false; return end
+            if (cur.Position - startPos).Magnitude > 8 then startPos = cur.Position end
             local delta = target - startPos
             local step = tweenSpeed * dt
             local arrived = delta.Magnitude <= math.max(step, 0.05)
@@ -703,36 +699,52 @@ do
         local pos = typeof(egg.CFrame) == "CFrame" and egg.CFrame.Position or nil
         if not pos then return false end
         local st = r234.EggState
-        local elapsed = 0
-        while elapsed < 2.5 do
+        local elapsed, attemptCd = 0, math.huge
+        while elapsed < 4 do
+            ensureAlive()
             if r247.Steal.Carrying then return true end
             if r247.Ragdolled() then
                 elapsed += r137.Heartbeat:Wait()
                 continue
             end
-            local best, bd = nil, 14
-            for _, p in ipairs(workspace:GetChildren()) do
-                if p.Name == "SmartPromptPart" and p:IsA("BasePart") then
-                    local cp = p:FindFirstChild("CarryAreaEgg")
-                    if cp and cp:IsA("ProximityPrompt") then
-                        local d = (p.Position - pos).Magnitude
-                        if d < bd then bd = d; best = cp end
+            if attemptCd >= 0.15 then
+                attemptCd = 0
+                local best, bd = nil, 14
+                for _, p in ipairs(workspace:GetChildren()) do
+                    if p.Name == "SmartPromptPart" and p:IsA("BasePart") then
+                        local cp = p:FindFirstChild("CarryAreaEgg")
+                        if cp and cp:IsA("ProximityPrompt") then
+                            local d = (p.Position - pos).Magnitude
+                            if d < bd then bd = d; best = cp end
+                        end
                     end
                 end
+                if best then
+                    pcall(function() best.HoldDuration = 0 end)
+                    if typeof(fireproximityprompt) == "function" then pcall(fireproximityprompt, best) end
+                elseif type(st) == "table" and type(st.CarryFieldEgg) == "function" then
+                    pcall(st.CarryFieldEgg, egg.Uid)
+                end
             end
-            if best then
-                pcall(function() best.HoldDuration = 0 end)
-                if typeof(fireproximityprompt) == "function" then pcall(fireproximityprompt, best) end
-            elseif type(st) == "table" and type(st.CarryFieldEgg) == "function" then
-                pcall(st.CarryFieldEgg, egg.Uid)
-            end
-            elapsed += r137.Heartbeat:Wait()
+            local d = r137.Heartbeat:Wait()
+            elapsed += d
+            attemptCd += d
         end
         return r247.Steal.Carrying == true
     end
 
+    -- health guard global
+    do
+        local hb = r137.Heartbeat:Connect(function()
+            if not r247.Toggle(stealToggle, false) and not r247.AntiGuard.Enabled then return end
+            ensureAlive()
+        end)
+        r240(function() hb:Disconnect() end)
+    end
+
     r244.Add(function()
         if not r247.Toggle(stealToggle, false) then return false end
+        ensureAlive()
         if r247.IsNight() or r247.WallSealed() then return false end
         if running then return true end
         running = true
@@ -742,12 +754,7 @@ do
                 if not r247.ClaimMovement("steal") then r247.Steal.Active = false; return end
                 local egg = pickEgg()
                 if not egg then r247.Steal.Active = false; r247.ReleaseMovement("steal"); return end
-
-                -- Teleport approach
-                if travelMethod == "Teleport" and r247.SafeCarry.Enabled then
-                    task.wait(waitAfterTeleport)
-                end
-
+                if travelMethod == "Teleport" then task.wait(waitAfterTeleport) end
                 local pos = egg.CFrame.Position
                 if r247.InsideBase() and not r247.InsideBase(pos) then
                     if not flyTo(homePos() + Vector3.new(0, 3, 0), false) then
@@ -763,8 +770,6 @@ do
                     return
                 end
                 task.wait(0.3)
-
-                -- Deliver home
                 local home = homePos()
                 local r = r247.Root()
                 if r then
@@ -786,27 +791,76 @@ do
         end)
         return true
     end)
+end
 
-    -- carry signal
-    do
-        local st = r234.EggState
-        local ev = type(st) == "table" and st.CarryChanged or nil
-        if type(ev) == "table" and type(ev.Connect) == "function" then
-            local ok, conn = pcall(ev.Connect, ev, function(i)
-                local c = type(i) == "table" and i.IsCarrying == true
-                if c and i.GuardDisabled == true then c = false end
-                r247.Steal.Carrying = c
-            end)
-            if ok and conn then r240(function() pcall(function() conn:Disconnect() end) end) end
+-- ===== ANTI GUARD ENGINE =====
+do
+    r247.AntiGuard._trigger = function()
+        if r247.AntiGuard.Busy then return end
+        r247.AntiGuard.Busy = true
+        r247.AntiGuard.BusySince = os.clock()
+        r247.ShieldPaused = true
+
+        local char = r232.Character
+        local hm = r247.Humanoid()
+        local root = r247.Root()
+        if not char or not hm or not root then
+            r247.AntiGuard.Busy = false
+            r247.ShieldPaused = false
+            return
         end
+
+        local wasAnchored = root.Anchored
+        local wasStand = hm.PlatformStand
+        local wasCollide = root.CanCollide
+
+        local hidden = {}
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") and p.Name ~= "HumanoidRootPart" then
+                hidden[#hidden+1] = { p = p, t = p.LocalTransparencyModifier }
+                pcall(function() p.LocalTransparencyModifier = 1 end)
+            elseif p:IsA("Decal") or p:IsA("Texture") then
+                hidden[#hidden+1] = { p = p, t = p.Transparency }
+                pcall(function() p.Transparency = 1 end)
+            end
+        end
+
+        pcall(function()
+            root.Anchored = true
+            root.CanCollide = false
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end)
+        pcall(function() hm.PlatformStand = true end)
+        pcall(function() hm:ChangeState(Enum.HumanoidStateType.Physics) end)
+
+        local startT = os.clock()
+        while os.clock() - startT < 2.5 and r247.AntiGuard.Busy do
+            if r232.Character ~= char then break end
+            local h = r247.Humanoid()
+            if h then
+                pcall(function() h.BreakJointsOnDeath = false end)
+                if h.Health < h.MaxHealth then pcall(function() h.Health = h.MaxHealth end) end
+            end
+            task.wait(0.05)
+        end
+
+        pcall(function()
+            root.Anchored = wasAnchored
+            root.CanCollide = wasCollide
+        end)
+        for _, e in ipairs(hidden) do
+            pcall(function() e.p.LocalTransparencyModifier = e.t end)
+            pcall(function() e.p.Transparency = e.t end)
+        end
+        pcall(function() hm.PlatformStand = wasStand end)
+        pcall(function() hm:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+
+        r247.ShieldPaused = false
+        r247.AntiGuard.Busy = false
     end
 
-    -- Anti Guard trigger
     do
-        local function armHitWindow()
-            r247.AntiGuard.HitArms = (r247.AntiGuard.HitArms or 0) + 1
-            r247.AntiGuard.HitArmedAt = os.clock()
-        end
         local st = r234.EggState
         local ev = type(st) == "table" and st.CarryChanged or nil
         if type(ev) == "table" and type(ev.Connect) == "function" then
@@ -814,29 +868,30 @@ do
                 local carrying = type(i) == "table" and i.IsCarrying == true
                 local was = r247.Steal._lastCarry
                 r247.Steal._lastCarry = carrying
+                r247.Steal.Carrying = carrying
                 if carrying and not was and r247.AntiGuard.Enabled and not r247.AntiGuard.Busy then
-                    -- Trigger anti guard
-                    r247.AntiGuard.Busy = true
-                    r247.AntiGuard.BusySince = os.clock()
-                    task.spawn(function()
-                        -- Simple anti guard: disguise + limp 3 sec, then release
-                        r247.ShieldPaused = true
-                        local char = r232.Character
-                        local hm = r247.Humanoid()
-                        if char and hm then
-                            pcall(function() hm.BreakJointsOnDeath = false end)
-                            hm.PlatformStand = true
-                            task.wait(2.5)
-                            pcall(function() hm.PlatformStand = false end)
-                        end
-                        r247.ShieldPaused = false
-                        r247.AntiGuard.Busy = false
-                    end)
+                    task.spawn(r247.AntiGuard._trigger)
                 end
             end)
             if ok and conn then r240(function() pcall(function() conn:Disconnect() end) end) end
         end
     end
+
+    do
+        local conn = r232:GetAttributeChangedSignal("RagdollEndTime"):Connect(function()
+            if not r247.AntiGuard.Enabled then return end
+            local t = tonumber(r232:GetAttribute("RagdollEndTime"))
+            if not t or t <= workspace:GetServerTimeNow() then return end
+            if not r247.AntiGuard.Busy then task.spawn(r247.AntiGuard._trigger) end
+        end)
+        r240(function() pcall(function() conn:Disconnect() end) end)
+    end
+
+    local respConn = r232.CharacterAdded:Connect(function()
+        r247.AntiGuard.Busy = false
+        r247.ShieldPaused = false
+    end)
+    r240(function() pcall(function() respConn:Disconnect() end) end)
 end
 
 -- ===== ANTI GUARD PANEL =====
