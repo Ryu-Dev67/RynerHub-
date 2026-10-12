@@ -1,28 +1,542 @@
---[[ Oxio Hub - Auto Steal + Anti Guard
-     Panel bisa di-drag
-     Outline: putih
-     Logo: rbxassetid://118755181202304
+--[[ Oxio Hub - Auto Steal + Anti Guard (with PanduHub shim)
+     - Cuma Farm tab, cuma Auto Steal section
+     - Anti Guard panel bisa di-drag, outline putih
+     - Logo: rbxassetid://118755181202304
 ]]
 
 local r231, r179, r180, r183, r136, r137, r181, r138, r139, r232
 local r182, r233, r234, r235, r238, r240, r241, r192, r243, r244
 local r247, r263
 
--- ============= BOOTSTRAP =============
+-- ============= PANDUHUB SHIM (from original oxio_sae) =============
 do
     r231 = function(s4)
         local s2 = typeof(getgenv) == "function" and getgenv() or _G
         if type(s2.ChilliDebugPrint) == "function" then pcall(s2.ChilliDebugPrint, s4) end
     end
 
-    local _PLib = nil
+    local _PanduLib = nil
     local _ok, _err = pcall(function()
-        _PLib = loadstring(game:HttpGet("https://script.panduhub.com/PanduUiLibrary.lua"))()
+        _PanduLib = loadstring(game:HttpGet("https://script.panduhub.com/PanduUiLibrary.lua"))()
     end)
-    assert(_ok and type(_PLib) == "table", "PanduHub failed: " .. tostring(_err))
+    assert(_ok and type(_PanduLib) == "table", "PanduHub failed: " .. tostring(_err))
 
-    r179 = _PLib
-    assert(type(r179.CreateWindow) == "function" and type(r179.Finalize) == "function", "Chilli Lib invalid.")
+    local function _makePanduShim(PLib)
+        local function _mkHandle(defaultVal)
+            local v = defaultVal
+            local subs = {}
+            local h = {}
+            h.Get = function() return v end
+            h.Set = function(_, nv)
+                v = nv
+                for i = 1, #subs do pcall(subs[i], nv) end
+            end
+            h.Subscribe = function(_, fn)
+                local alive = true
+                subs[#subs + 1] = function(nv) if alive then pcall(fn, nv) end end
+                return {
+                    Connected = true,
+                    Disconnect = function(s) s.Connected = false; alive = false end,
+                }
+            end
+            h.JoinExclusiveGroup = function() end
+            h.GetQuickPath = function() return nil end
+            return h
+        end
+
+        local function _pick(obj, names)
+            if type(obj) ~= "table" then return nil end
+            for _, n in ipairs(names) do
+                if type(obj[n]) == "function" then return n end
+            end
+            return nil
+        end
+
+        local function _setHandle(handle, val)
+            if type(handle) ~= "table" then return end
+            for _, m in ipairs({ "Set", "SetValue", "set" }) do
+                if type(handle[m]) == "function" then
+                    pcall(handle[m], handle, val)
+                    return
+                end
+            end
+        end
+
+        local function _dbg(...)
+            local ok, g = pcall(function() return (getgenv and getgenv()) or _G end)
+            if ok and type(g) == "table" and g.OxioShimDebug == true then
+                pcall(warn, "[OxioShim]", ...)
+            end
+        end
+
+        local function _nparams(fn)
+            if type(fn) ~= "function" then return nil end
+            if debug and type(debug.info) == "function" then
+                local ok, n, va = pcall(debug.info, fn, "a")
+                if ok and type(n) == "number" then return n, va == true end
+            end
+            if debug and type(debug.getinfo) == "function" then
+                local ok, i = pcall(debug.getinfo, fn)
+                if ok and type(i) == "table" and type(i.nparams) == "number" then
+                    return i.nparams, i.isvararg == true
+                end
+            end
+            return nil
+        end
+
+        local function _usesCfgTable(fn)
+            local getc = (debug and debug.getconstants) or getconstants
+            if type(getc) ~= "function" then return false end
+            local ok, cs = pcall(getc, fn)
+            if not ok or type(cs) ~= "table" then return false end
+            for _, c in pairs(cs) do
+                if c == "Callback" or c == "callback" then return true end
+            end
+            return false
+        end
+
+        local function _chooseForm(fn, forms)
+            local n, va = _nparams(fn)
+            if n and not va then
+                local want = n - 1
+                for _, f in ipairs(forms) do
+                    if f.argc == want then return f end
+                end
+                local best
+                for _, f in ipairs(forms) do
+                    if f.argc <= want and (not best or f.argc > best.argc) then best = f end
+                end
+                if best then return best end
+            elseif _usesCfgTable(fn) then
+                for _, f in ipairs(forms) do
+                    if f.cfg then return f end
+                end
+            end
+            return forms[1]
+        end
+
+        local function _invoke(pSec, M, forms, label)
+            local fn = pSec[M]
+            local f = _chooseForm(fn, forms)
+            local n, va = _nparams(fn)
+            _dbg(label, M, "nparams=" .. tostring(n), "vararg=" .. tostring(va), "form argc=" .. tostring(f.argc))
+            local ok, res = pcall(function() return fn(pSec, f.build()) end)
+            if ok then return res, f end
+            _dbg(label, "form gagal:", tostring(res))
+            for _, g in ipairs(forms) do
+                if g ~= f then
+                    local ok2, res2 = pcall(function() return fn(pSec, g.build()) end)
+                    if ok2 then
+                        _dbg(label, "fallback form argc=" .. tostring(g.argc), "berhasil")
+                        return res2, g
+                    end
+                end
+            end
+            return nil, nil
+        end
+
+        local function _readState(handle)
+            if type(handle) ~= "table" then return nil end
+            for _, m in ipairs({ "Get", "GetValue", "GetState" }) do
+                local okf, f = pcall(function() return handle[m] end)
+                if okf and type(f) == "function" then
+                    local ok, v = pcall(f, handle)
+                    if ok and type(v) == "boolean" then return v end
+                end
+            end
+            for _, k in ipairs({ "Value", "State", "CurrentValue", "Enabled", "Toggled" }) do
+                local ok, v = pcall(function() return handle[k] end)
+                if ok and type(v) == "boolean" then return v end
+            end
+            return nil
+        end
+
+        local _tracked = {}
+        local _pollStarted = false
+        local function _startPoll()
+            if _pollStarted then return end
+            _pollStarted = true
+            task.spawn(function()
+                while true do
+                    task.wait(0.25)
+                    for i = 1, #_tracked do
+                        local t = _tracked[i]
+                        local v = _readState(t.ui)
+                        if v ~= nil and v ~= t.last then
+                            t.last = v
+                            if v ~= t.h:Get() then
+                                t.rawSet(t.h, v)
+                                if type(t.cb) == "function" then pcall(t.cb, v) end
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+
+        local function _wrapSection(pSec)
+            if type(pSec) ~= "table" then pSec = {} end
+            local sec = {}
+
+            local M_TOGGLE   = _pick(pSec, { "AddToggle", "Toggle", "CreateToggle", "AddCheckbox", "Checkbox" })
+            local M_CHECKBOX = _pick(pSec, { "AddCheckbox", "Checkbox", "AddToggle", "Toggle" })
+            local M_SLIDER   = _pick(pSec, { "AddSlider", "Slider", "CreateSlider", "AddRange" })
+            local M_DROPDOWN = _pick(pSec, { "AddDropdown", "Dropdown", "CreateDropdown", "AddCombo" })
+            local M_BUTTON   = _pick(pSec, { "AddButton", "Button", "CreateButton" })
+            local M_LABEL    = _pick(pSec, { "AddLabel", "Label", "AddHeader", "Header", "AddText" })
+            local M_INPUT    = _pick(pSec, { "AddTextbox", "Textbox", "AddInput", "Input" })
+
+            local function _mkToggle(M, name, def, cb)
+                local forms = {
+                    { argc = 3, passDef = true, build = function() return name, def, cb end },
+                    { argc = 2, build = function() return name, cb end },
+                    { argc = 1, cfg = true, passDef = true, build = function()
+                        return { Name = name, Text = name, Title = name, Default = def, Value = def,
+                                 State = def, CurrentValue = def, Callback = cb, callback = cb }
+                    end },
+                }
+                local handle, form = _invoke(pSec, M, forms, "toggle")
+                if def and form and not form.passDef then _setHandle(handle, true) end
+                return handle
+            end
+
+            local function _bindToggle(M, name, def, h, userCb)
+                local syncing = false
+                local ui = nil
+                local rawSet = h.Set
+                local function libCb(v)
+                    if syncing then return end
+                    if type(v) ~= "boolean" then v = not h:Get() end
+                    rawSet(h, v)
+                    if type(userCb) == "function" then pcall(userCb, v) end
+                end
+                ui = _mkToggle(M, name, def, libCb)
+                h.Set = function(_, nv)
+                    rawSet(h, nv)
+                    if type(ui) == "table" and not syncing then
+                        syncing = true
+                        pcall(_setHandle, ui, nv)
+                        syncing = false
+                    end
+                end
+                task.defer(function()
+                    if type(ui) == "table" then
+                        syncing = true
+                        pcall(_setHandle, ui, def)
+                        syncing = false
+                        _tracked[#_tracked + 1] = { ui = ui, h = h, rawSet = rawSet, cb = userCb, last = _readState(ui) }
+                        _startPoll()
+                    end
+                    if def and type(userCb) == "function" then pcall(userCb, true) end
+                end)
+                return ui
+            end
+
+            function sec:CreateToggle(cfg)
+                local def = cfg.Default == true
+                local h = _mkHandle(def)
+                if not M_TOGGLE then return h end
+                _bindToggle(M_TOGGLE, cfg.Name or "Toggle", def, h, function(v)
+                    if type(cfg.Callback) == "function" then pcall(cfg.Callback, v) end
+                end)
+                return h
+            end
+
+            function sec:CreateSlider(cfg)
+                local name = cfg.Name or "Slider"
+                local mn, mx, def = cfg.Min or 0, cfg.Max or 100, cfg.Default or cfg.Min or 0
+                local h = _mkHandle(def)
+                if not M_SLIDER then return h end
+                local function cb(v)
+                    v = tonumber(v) or def
+                    h:Set(v)
+                    if type(cfg.Callback) == "function" then pcall(cfg.Callback, v) end
+                end
+                local forms = {
+                    { argc = 5, passDef = true, build = function() return name, mn, mx, def, cb end },
+                    { argc = 4, build = function() return name, mn, mx, cb end },
+                    { argc = 1, cfg = true, passDef = true, build = function()
+                        return { Name = name, Text = name, Title = name, Min = mn, Max = mx,
+                                 Default = def, Value = def, CurrentValue = def,
+                                 Increment = cfg.Increment or 1, Callback = cb, callback = cb }
+                    end },
+                }
+                local handle, form = _invoke(pSec, M_SLIDER, forms, "slider")
+                if form and not form.passDef and def ~= mn then _setHandle(handle, def) end
+                return h
+            end
+
+            function sec:CreateDropdown(cfg)
+                local name = cfg.Name or "Dropdown"
+                local opts = cfg.Options or {}
+                local def  = cfg.Default or opts[1] or ""
+                local h    = _mkHandle(def)
+                if not M_DROPDOWN then return h end
+                local function cb(v)
+                    if type(v) == "table" then v = v[1] or def end
+                    h:Set(v)
+                    if type(cfg.Callback) == "function" then pcall(cfg.Callback, v) end
+                end
+                local forms = {
+                    { argc = 4, passDef = true, build = function() return name, opts, def, cb end },
+                    { argc = 3, build = function() return name, opts, cb end },
+                    { argc = 1, cfg = true, passDef = true, build = function()
+                        return { Name = name, Text = name, Title = name, Options = opts, Values = opts,
+                                 Default = def, Value = def, CurrentOption = { def },
+                                 Callback = cb, callback = cb }
+                    end },
+                }
+                local handle, form = _invoke(pSec, M_DROPDOWN, forms, "dropdown")
+                if form and not form.passDef then _setHandle(handle, def) end
+                return h
+            end
+
+            function sec:CreateMultiDropdown(cfg)
+                local opts = cfg.Options or {}
+                local selected = {}
+                if type(cfg.Default) == "table" then
+                    for _, o in ipairs(cfg.Default) do selected[o] = true end
+                else
+                    for _, o in ipairs(opts) do selected[o] = true end
+                end
+                local h = _mkHandle(selected)
+
+                local function fire()
+                    local snap = {}
+                    for o, v in pairs(selected) do if v then snap[o] = true end end
+                    if type(cfg.Callback) == "function" then pcall(cfg.Callback, snap) end
+                end
+
+                if M_LABEL and cfg.Name then
+                    pcall(function() pSec[M_LABEL](pSec, cfg.Name) end)
+                end
+
+                local M = M_CHECKBOX or M_TOGGLE
+                if M then
+                    for _, o in ipairs(opts) do
+                        local rowH = _mkHandle(selected[o] == true)
+                        _bindToggle(M, "  · " .. o, selected[o] == true, rowH, function(v)
+                            selected[o] = v
+                            h:Set(selected)
+                            fire()
+                        end)
+                    end
+                end
+
+                task.defer(fire)
+                return h
+            end
+
+            function sec:CreateButton(cfg)
+                if not M_BUTTON then return nil end
+                local name = cfg.Name or "Button"
+                local function cb()
+                    if type(cfg.Callback) == "function" then pcall(cfg.Callback) end
+                end
+                local forms = {
+                    { argc = 2, build = function() return name, cb end },
+                    { argc = 1, cfg = true, build = function()
+                        return { Name = name, Text = name, Title = name, Callback = cb, callback = cb }
+                    end },
+                }
+                _invoke(pSec, M_BUTTON, forms, "button")
+                return nil
+            end
+
+            function sec:CreateLabel(cfg)
+                local h = _mkHandle(cfg.Text or cfg.Name or "")
+                if not M_LABEL then return h end
+                pcall(function() pSec[M_LABEL](pSec, cfg.Text or cfg.Name or "") end)
+                return h
+            end
+
+            function sec:CreateText(cfg)
+                local h = _mkHandle(cfg.Text or "")
+                if not M_LABEL then return h end
+                pcall(function() pSec[M_LABEL](pSec, cfg.Text or "") end)
+                local orig = h.Set
+                h.Set = function(_, nv)
+                    h._text = nv
+                    orig(h, nv)
+                end
+                return h
+            end
+
+            function sec:CreateInput(cfg)
+                local name = cfg.Name or "Input"
+                local def = cfg.Default or ""
+                local h = _mkHandle(def)
+                if not M_INPUT then return h end
+                local function cb(v)
+                    v = tostring(v or "")
+                    h:Set(v)
+                    if type(cfg.Callback) == "function" then pcall(cfg.Callback, v) end
+                end
+                local forms = {
+                    { argc = 3, passDef = true, build = function() return name, def, cb end },
+                    { argc = 2, build = function() return name, cb end },
+                    { argc = 1, cfg = true, passDef = true, build = function()
+                        return { Name = name, Text = name, Title = name, Default = def, Value = def,
+                                 Placeholder = cfg.Placeholder or "", Callback = cb, callback = cb }
+                    end },
+                }
+                local handle, form = _invoke(pSec, M_INPUT, forms, "input")
+                if form and not form.passDef and def ~= "" then _setHandle(handle, def) end
+                return h
+            end
+
+            sec.CreateParagraph = function(self, cfg)
+                return self:CreateText({ Text = (cfg.Title or "") .. "\n" .. (cfg.Content or "") })
+            end
+
+            return sec
+        end
+
+        local function _wrapTab(pTab)
+            if type(pTab) ~= "table" then pTab = {} end
+            local tab = {}
+            local _defaultPage = nil
+
+            local M_PAGE = _pick(pTab, { "CreatePage", "Page", "AddPage", "NewPage" })
+            local M_SEC_DIRECT = _pick(pTab, { "CreateSection", "AddSection", "Section" })
+
+            local function _getPage()
+                if _defaultPage then return _defaultPage end
+                if M_PAGE then
+                    local ok, p = pcall(function() return pTab[M_PAGE](pTab, "Main") end)
+                    if ok and type(p) == "table" then
+                        _defaultPage = p
+                        return p
+                    end
+                end
+                return nil
+            end
+
+            function tab:CreateSection(cfg)
+                local page = _getPage()
+                if page then
+                    local M = _pick(page, { "CreateSection", "AddSection", "Section" })
+                    if M then
+                        local ok, s = pcall(function() return page[M](page, cfg.Name or "Section") end)
+                        if ok and type(s) == "table" then return _wrapSection(s) end
+                    end
+                end
+                if M_SEC_DIRECT then
+                    local ok, s = pcall(function() return pTab[M_SEC_DIRECT](pTab, cfg.Name or "Section") end)
+                    if ok and type(s) == "table" then return _wrapSection(s) end
+                end
+                return _wrapSection(pTab)
+            end
+
+            local _defaultSection = nil
+            local function _fallbackSection()
+                if not _defaultSection then _defaultSection = _wrapSection(pTab) end
+                return _defaultSection
+            end
+
+            setmetatable(tab, {
+                __index = function(_, k)
+                    if k == "CreateSection" then return nil end
+                    local s = _fallbackSection()
+                    if type(s[k]) == "function" then
+                        return function(self, ...) return s[k](s, ...) end
+                    end
+                end,
+            })
+
+            return tab
+        end
+
+        local _pWin = nil
+        local _defaultTab = nil
+        local _namedStates = {}
+
+        local function _buildWindow(cfg)
+            local win = {}
+            local _wStates = {}
+
+            local M_WIN = _pick(PLib, { "CreateWindow", "Window", "new", "Create", "Init" })
+            local M_TAB = nil
+
+            if M_WIN then
+                pcall(function()
+                    _pWin = PLib[M_WIN](PLib, { Title = cfg.Name or "Oxio Hub" })
+                end)
+            end
+            if _pWin then
+                M_TAB = _pick(_pWin, { "CreateTab", "Tab", "AddTab", "NewTab" })
+            end
+
+            function win:CreateTab(tcfg)
+                local t = nil
+                if _pWin and M_TAB then
+                    local ok, r = pcall(function()
+                        return _pWin[M_TAB](_pWin, tcfg.Name or "Tab")
+                    end)
+                    if ok and type(r) == "table" then t = r end
+                end
+                local wrapped = _wrapTab(t or _pWin or {})
+                if not _defaultTab then _defaultTab = wrapped end
+                return wrapped
+            end
+
+            function win:GetDefaultTab()
+                if not _defaultTab then
+                    _defaultTab = win:CreateTab({ Name = "Farm" })
+                end
+                return _defaultTab
+            end
+
+            function win:CreateState(cfg)
+                local h = _mkHandle(cfg.Default)
+                if cfg.Name then
+                    _wStates[cfg.Name] = h
+                    _namedStates[cfg.Name] = h
+                end
+                return h
+            end
+
+            function win:GetState(name)
+                return _wStates[name] or _namedStates[name] or _mkHandle(nil)
+            end
+
+            function win:CreateExclusiveGroup(cfg)
+                return {
+                    _members = {},
+                    Add = function(self, h) table.insert(self._members, h) end,
+                }
+            end
+
+            return win
+        end
+
+        local lib = {}
+        lib.ManualQuickDefaults = {}
+
+        function lib:CreateWindow(cfg) return _buildWindow(cfg) end
+
+        lib.Notify = function(...)
+            local M = _pick(PLib, { "Notify", "Notification", "Notif", "AddNotification" })
+            if not M then return end
+            local args = { ... }
+            if type(args[1]) == "table" then table.remove(args, 1) end
+            pcall(function()
+                PLib[M](PLib, tostring(args[1] or ""), tostring(args[2] or ""))
+            end)
+        end
+
+        function lib:Finalize(cfg)
+            if _pWin then
+                local M = _pick(_pWin, { "Finalize", "Init", "Show", "Open", "LoadUi", "Build", "Run" })
+                if M then pcall(function() _pWin[M](_pWin) end) end
+            end
+        end
+
+        return lib
+    end
+
+    r179 = _makePanduShim(_PanduLib)
+    assert(type(r179) == "table" and type(r179.CreateWindow) == "function" and type(r179.Finalize) == "function", "Shim invalid.")
 
     r179.ManualQuickDefaults = { PinnedFeatures = {}, Keybinds = {}, PinGroups = {}, LeftCenterHidden = true }
 
@@ -72,7 +586,10 @@ do
         r238 = function()
             local n = rng:NextInteger(12, 20)
             local out = table.create(n)
-            for i = 1, n do out[i] = string.sub(chars, rng:NextInteger(1, #chars), rng:NextInteger(1, #chars)) end
+            for i = 1, n do
+                local k = rng:NextInteger(1, #chars)
+                out[i] = string.sub(chars, k, k)
+            end
             return table.concat(out)
         end
     end
@@ -90,16 +607,16 @@ do
         end
     end
 
-    do
-        r244 = { _list = {}, _wake = true }
-        r244.Add = function(fn)
-            local s = { Run = fn, Gap = 0.35, Idle = 5, Repeat = false, Hold = 0 }
-            table.insert(r244._list, s)
-            return s
-        end
-        r244.Wake = function() r244._wake = true end
-        r244.Backoff = function(s, sec) if s then s.Hold = tonumber(sec) or 6 end end
+    r244 = { _list = {}, _wake = true }
+    r244.Add = function(fn)
+        local s = { Run = fn, Gap = 0.35, Idle = 5, Repeat = false, Hold = 0 }
+        table.insert(r244._list, s)
+        return s
+    end
+    r244.Wake = function() r244._wake = true end
+    r244.Backoff = function(s, sec) if s then s.Hold = tonumber(sec) or 6 end end
 
+    do
         local beat = r137.Heartbeat:Connect(function(dt)
             local woke = r244._wake
             r244._wake = false
@@ -119,7 +636,7 @@ do
     end
 end
 
--- ============= r247 BASE =============
+-- ============= CORE r247 =============
 do
     r247 = {
         Steal = { Active = false, LastFinishedAt = 0, Carrying = false },
@@ -141,8 +658,7 @@ do
         Movement = { Owner = nil, PlaceWanted = false, StealFirst = false, MutationWanted = false, FracturedWanted = false },
         AntiGuard = { Enabled = false, Busy = false, BusySince = 0, HitArms = 0, HitArmedAt = 0, Handle = nil, PanelHandle = nil, PanelShown = true, ShowPanel = nil, Render = nil },
         Treadmill = { Riding = false },
-        Flying = false, Driving = 0,
-        ShieldPaused = false, SpeedForced = false,
+        Flying = false, Driving = 0, ShieldPaused = false, SpeedForced = false,
         UiQueue = {},
     }
 
@@ -400,62 +916,50 @@ do
         for _, k in ipairs(BAT_NAMES) do if string.find(n, k, 1, true) then return true end end
         return false
     end
-    r247.FindBat = function()
-        local c = r232.Character
-        local equip = c and c:FindFirstChildWhichIsA("Tool")
-        if r247.IsBatTool(equip) then return equip end
-        local bp = r232:FindFirstChildOfClass("Backpack")
-        if bp then for _, t in ipairs(bp:GetChildren()) do if r247.IsBatTool(t) then return t end end end
-        if c then for _, t in ipairs(c:GetChildren()) do if r247.IsBatTool(t) then return t end end end
-        return nil
-    end
 
-    -- ============= SHIELD (Humanoid Swap) =============
+    -- ============= SHIELD (Humanoid Swap for Anti Guard disguise) =============
     do
-        local r14 = { Original = nil, Clone = nil, Links = {} }
-        local links = r14.Links
+        local swap = { Original = nil, Clone = nil, Links = {} }
 
-        local function clearLinks()
-            for _, c in ipairs(links) do pcall(function() c:Disconnect() end) end
-            table.clear(links)
+        local function clear()
+            for _, c in ipairs(swap.Links) do pcall(function() c:Disconnect() end) end
+            table.clear(swap.Links)
         end
 
         r247.UndoSwap = function()
-            clearLinks()
+            clear()
             local c = r232.Character
-            local orig, cl = r14.Original, r14.Clone
-            r14.Original, r14.Clone = nil, nil
+            local orig, cl = swap.Original, swap.Clone
+            swap.Original, swap.Clone = nil, nil
             if orig and cl and c and orig.Parent == nil and cl.Parent == c then
                 orig.Parent = c
                 workspace.CurrentCamera.CameraSubject = orig
                 pcall(function() cl:Destroy() end)
             end
         end
-
         r247.Swapped = function()
             local c = r232.Character
-            return r14.Clone ~= nil and c ~= nil and r14.Clone.Parent == c
+            return swap.Clone ~= nil and c ~= nil and swap.Clone.Parent == c
         end
 
         local function doSwap()
             local c = r232.Character
             local h = c and c:FindFirstChildOfClass("Humanoid")
             if not h or h.Health <= 0 then return end
-            if r14.Clone and r14.Clone.Parent == c then return end
+            if swap.Clone and swap.Clone.Parent == c then return end
             if not r247.Grounded(h) then return end
             local clone = h:Clone()
             h.Parent = nil
             clone.Parent = c
             workspace.CurrentCamera.CameraSubject = clone
-            r14.Original, r14.Clone = h, clone
-
-            table.insert(links, h:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+            swap.Original, swap.Clone = h, clone
+            table.insert(swap.Links, h:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
                 if clone.Parent then clone.WalkSpeed = h.WalkSpeed end
             end))
-            table.insert(links, clone.Died:Connect(function()
-                clearLinks()
-                local orig = r14.Original
-                r14.Original, r14.Clone = nil, nil
+            table.insert(swap.Links, clone.Died:Connect(function()
+                clear()
+                local orig = swap.Original
+                swap.Original, swap.Clone = nil, nil
                 local cc = r232.Character
                 if cc and orig and h.Parent == nil then
                     orig.Parent = cc
@@ -476,98 +980,24 @@ do
                 doSwap()
             end)
             car = r232.CharacterAdded:Connect(function()
-                clearLinks()
-                r14.Original, r14.Clone = nil, nil
+                clear(); swap.Original, swap.Clone = nil, nil
                 task.spawn(function() task.wait(1); doSwap() end)
             end)
         end
-
         local function stop()
             if hb then hb:Disconnect(); hb = nil end
             if car then car:Disconnect(); car = nil end
-            clearLinks()
+            clear()
         end
-
-        r247.Shield = function(name, on)
-            if on then start() else stop() end
-        end
+        r247.Shield = function(name, on) if on then start() else stop() end end
         r247.Shield("load", true)
         r240(stop)
     end
 
-    -- ============= ON HUMANOID CHANGED =============
-    do
-        local subs = {}
-        r247.OnHumanoidChanged = function(fn)
-            table.insert(subs, fn)
-            local s = { Connected = true, Disconnect = function()
-                s.Connected = false
-                local i = table.find(subs, fn)
-                if i then table.remove(subs, i) end
-            end }
-            return s
-        end
-    end
-
-    r247.MutationName = function(id)
-        local map = { Boss = "Fractured", GreatBloom = "Spirit Bloom", Sakura = "Bloom", Monstrous = "Parasite" }
-        task.spawn(function()
-            local m = r234.Mutations
-            local ok, all = pcall(function() return m.All() end)
-            if ok and type(all) == "table" then
-                for k, v in pairs(all) do
-                    local mid = type(v) == "table" and (v.Id or k) or nil
-                    local lbl = type(v) == "table" and v.Label or nil
-                    if mid ~= nil and type(lbl) == "string" and lbl ~= "" then map[tostring(mid)] = lbl end
-                end
-            end
-        end)
-        return map[tostring(id)] or tostring(id)
-    end
-    r263 = r247.MutationName
-
-    -- ============= WALKTO =============
-    do
-        local function walkToPos(pos, threshold, timeout, abort)
-            threshold = tonumber(threshold) or 6
-            timeout = tonumber(timeout) or 10
-            local elapsed = 0
-            local last, stuck = nil, 0
-            local cooldown = 0
-            while elapsed < timeout do
-                if type(abort) == "function" and abort() then r247.StopWalking(); return false end
-                local c = r232.Character
-                local r = c and c:FindFirstChild("HumanoidRootPart")
-                local h = c and c:FindFirstChildOfClass("Humanoid")
-                if not r or not h or h.Health <= 0 then return false end
-                if (r.Position - pos).Magnitude <= threshold then r247.StopWalking(); return true end
-                local moved = last and (r.Position - last).Magnitude < 1
-                stuck = moved and stuck + 0.2 or 0
-                last = r.Position
-                cooldown = math.max(0, cooldown - 0.2)
-                if stuck >= 0.8 and cooldown <= 0 then
-                    r247.LeaveBelt()
-                    pcall(function() h.Jump = true end)
-                    stuck = 0; cooldown = 1.5
-                end
-                h:MoveTo(pos)
-                elapsed += task.wait(0.2)
-            end
-            r247.StopWalking()
-            return r247.DistanceTo(pos) <= threshold
-        end
-        r247.WalkTo = function(pos, threshold, timeout, abort)
-            r247.Driving = r247.Driving + 1
-            local ok, res = pcall(walkToPos, pos, threshold, timeout, abort)
-            r247.Driving = math.max(0, r247.Driving - 1)
-            return ok and res == true
-        end
-    end
-
-    -- ============= STEAL HOME / r3_6 =============
+    -- ============= EXPAND RARITY =============
     r247.ExpandRarityOptions = function()
         local opts = { "Any" }
-        local rarityMap = { Any = 0 }
+        local map = { Any = 0 }
         local seen = {}
         local dir = r234.Assets and r234.Assets.Directory
         if type(dir) == "table" then
@@ -575,9 +1005,7 @@ do
                 local rar = type(v) == "table" and v.Rarity or nil
                 if type(rar) == "table" then
                     local num = tonumber(rar.RarityNumber or rar.Rank)
-                    if num and not seen[num] then
-                        seen[num] = tostring(rar.DisplayName or rar._id or num)
-                    end
+                    if num and not seen[num] then seen[num] = tostring(rar.DisplayName or rar._id or num) end
                 end
             end
         end
@@ -589,21 +1017,18 @@ do
         table.sort(nums)
         for _, n in ipairs(nums) do
             table.insert(opts, seen[n])
-            rarityMap[seen[n]] = n
+            map[seen[n]] = n
         end
-        return opts, rarityMap
+        return opts, map
     end
 end
 
--- ============= STEAL LOGIC =============
+-- ============= AUTO STEAL SECTION =============
 do
     local r7_4 = { "Best Rarity", "Biggest Weight", "Best Mutation", "Highest Value", "Lowest Value" }
     local r191, r264 = r247.ExpandRarityOptions()
 
-    local r150 = {
-        "Forest", "Desert", "Snow", "Lake", "Jungle", "Volcano",
-        "Prehistoric", "Cosmic", "Abyss Ocean", "Cherry Blossom", "Light Dark", "Temple of Trials",
-    }
+    local r150 = { "Forest", "Desert", "Snow", "Lake", "Jungle", "Volcano", "Prehistoric", "Cosmic", "Abyss Ocean", "Cherry Blossom", "Light Dark", "Temple of Trials" }
     local areaSeen = {}
     for _, v in ipairs(r150) do areaSeen[v] = true end
 
@@ -625,15 +1050,12 @@ do
     local r265 = {}
     for _, v in ipairs(r150) do r265[v] = true end
 
-    local r266 = 0
-    local r267 = {}
+    local r266, r267 = 0, {}
     local r268, r269, r270 = {}, {}, {}
     local r271, r272, r273 = false, {}, 0
     local r274 = r7_4[4]
     local r275, r276, r277 = 400, 27.4, 400
-    local r278 = nil
     local r16_2
-
     local r291 = 0
     local r292 = {}
     local r293 = 20
@@ -643,16 +1065,6 @@ do
         return arg1 ~= r291 or not r247.Toggle(r16_2, false)
     end
 
-    -- r299: night/wall timer
-    local r296, r298 = {}, 0
-    local function r297(t)
-        if type(t) ~= "number" or r296[t] then return end
-        r296[t] = true
-        task.delay(math.max(0, t - workspace:GetServerTimeNow()) + 0.05, function()
-            r296[t] = nil
-            r244.Wake()
-        end)
-    end
     local function r299()
         local cyc = r234.AreaEggCycle
         if type(cyc) ~= "table" then return nil end
@@ -661,96 +1073,14 @@ do
             return t, cyc.IsNightPhase(t), cyc.NextNightTime(t), cyc.NextResetTime(t)
         end)
         if not ok or type(nextReset) ~= "number" then return nil end
-        if nextNight == true then
-            r298 = nextReset + r247.WallOpenDelay()
-            r297(r298)
-            return r298, "night", night
-        end
-        if r247.WallSealed() then
-            r297(night + 0.3)
-            return math.max(r298, night), "wall", night
-        end
-        if type(nextNight) == "number" and nextNight > night then r297(nextNight) end
+        if nextNight == true then return nextReset + r247.WallOpenDelay(), "night", night end
+        if r247.WallSealed() then return math.max(0, night), "wall", night end
         return nil
     end
 
-    -- field tracking
-    local r301, r302 = nil, 0
-    local function r303(skipFirst)
-        local out = {}
-        local st = r234.EggState
-        if type(st) ~= "table" or type(st.ReadFieldEggs) ~= "function" then return out end
-        task.spawn(function()
-            local ok, snap = pcall(st.ReadFieldEggs)
-            if ok and type(snap) == "table" and type(snap.Records) == "table" then
-                local prefix = "FirstAreaEgg_" .. tostring(r232.UserId)
-                for _, rec in pairs(snap.Records) do
-                    if type(rec) == "table" and type(rec.Uid) == "string" then
-                        if not (skipFirst and string.sub(rec.Uid, 1, #prefix) == prefix) then
-                            out[rec.Uid] = true
-                        end
-                    end
-                end
-            end
-        end)
-        return out
-    end
-    local function r304()
-        if r301 == nil then return false end
-        if r247.IsNight() then return true end
-        if r302 == math.huge then r302 = os.clock() + 8 end
-        return false
-    end
-    local function r305()
-        if r301 and r302 == math.huge then return end
-        r301 = r303(true)
-        r302 = math.huge
-        table.clear(r268); table.clear(r270); table.clear(r269); table.clear(r292)
-        r294 = nil
-    end
-    local function r306()
-        if not r301 then return false end
-        if os.clock() >= r302 then r301 = nil; return false end
-        local cur = r303()
-        if next(cur) == nil then return true end
-        local seen = false; local unseen = false
-        for k in pairs(cur) do
-            if r301[k] then seen = true else unseen = true end
-        end
-        if not seen then r301 = nil; return false end
-        return not unseen
-    end
-
-    -- r310: get list of eggs
-    local function r307(cat)
-        local dir = r234.Assets and r234.Assets.Directory
-        local a = type(dir) == "table" and dir[tostring(cat)] or nil
-        local rar = type(a) == "table" and type(a.Rarity) == "table" and a.Rarity or nil
-        local out = {}
-        if rar then rar = tonumber(rar.RarityNumber or rar.Rank) end
-        out.RarityNumber = rar or 0
-        out.EarningRate = type(a) == "table" and tonumber(a.EarningRate) or 0
-        return out
-    end
-    local function r308(muts)
-        local m = r234.Mutations
-        if type(m) == "table" and type(m.EarningsFor) == "function" then
-            local ok, v = pcall(m.EarningsFor, type(muts) == "table" and muts or {})
-            if ok and type(v) == "number" then return v end
-        end
-        return 1
-    end
-    local function r309(cat, scale)
-        local er = r234.EggRecords
-        if type(er) == "table" and type(er.WeightKgForScale) == "function" then
-            local ok, v = pcall(er.WeightKgForScale, cat, scale)
-            if ok and type(v) == "number" then return v end
-        end
-        return 0
-    end
-
+    -- main steal runner (simplified but functional)
     local r310 = function(forFuse, includeCarried)
-        local recs = nil
+        local recs
         local st = r234.EggState
         if type(st) == "table" and type(st.ReadFieldEggs) == "function" then
             task.spawn(function()
@@ -774,9 +1104,7 @@ do
             local eligible = uid and (rec.State == "Slot" or rec.State == "Dropped" or (rec.State == "Carried" and includeCarried == true and forFuse ~= true and not (r247.Steal.Carrying and uid == r247.Steal.CarryUid)))
             local forced = uid and r268[uid] or nil
             local priority = uid and r269[uid] == true or false
-            local index = forFuse ~= true and r271 and uid and r272[tostring(rec.AssetCategory)] or nil
-            local rift = forFuse ~= true and r247.Steal.RiftPriority == true and uid and r247.Steal.RiftNeeds[tostring(rec.AssetCategory)] == true
-            local areaOK = forFuse == true or forced or priority or rift or index ~= nil or r265[tostring(rec.AreaId)] == true
+            local areaOK = forFuse == true or forced or priority or r265[tostring(rec.AreaId)] == true
             local blocked = forFuse ~= true and forced == nil and r270[uid] == true
             local skip = r301 ~= nil and r301[uid] == true
             eligible = eligible and typeof(rec.BottomCFrame) == "CFrame"
@@ -791,20 +1119,17 @@ do
                 local factor = scale > 5 and (scale/5)^1.2 * 19.637875755794113 or scale^1.85
                 local valueOK = r273 <= 0 or info.EarningRate * factor * mult >= r273
                 valueOK = rarityOK and specOK and valueOK
-                local riftOnly = rift and not valueOK and not priority and forced == nil and index == nil
                 local unsafe = forFuse ~= true and r247.SafeCarry.Unsafe({ Uid = uid, Category = cat })
                 if unsafe then
                     r268[uid] = nil; r269[uid] = nil
                     r247.SafeCarry.LastSkip = unsafe
-                elseif forFuse == true or forced or priority or rift or index ~= nil or valueOK then
+                elseif forFuse == true or forced or priority or valueOK then
                     table.insert(out, {
                         Uid = uid, Category = cat, Scale = scale, State = rec.State,
                         Rarity = info.RarityNumber, Weight = r309(rec.AssetCategory, scale),
                         Mutation = mult, Value = info.EarningRate * factor * mult,
                         CFrame = rec.BottomCFrame, AreaId = tostring(rec.AreaId),
-                        Rift = forFuse ~= true and rift,
-                        RiftOnly = forFuse ~= true and riftOnly,
-                        Index = index, Forced = forFuse ~= true and forced and forced.At or nil,
+                        Forced = forFuse ~= true and forced and forced.At or nil,
                         Priority = forFuse ~= true and priority,
                     })
                 end
@@ -819,9 +1144,6 @@ do
             if (a.Forced ~= nil) ~= (b.Forced ~= nil) then return a.Forced ~= nil end
             if a.Forced and b.Forced and a.Forced ~= b.Forced then return a.Forced < b.Forced end
             if a.Priority ~= b.Priority then return a.Priority == true end
-            if a.RiftOnly ~= b.RiftOnly then return b.RiftOnly == true end
-            if (a.Index ~= nil) ~= (b.Index ~= nil) then return a.Index ~= nil end
-            if a.Index and b.Index and a.Index ~= b.Index then return a.Index > b.Index end
             if r274 == r7_4[2] and a.Weight ~= b.Weight then return a.Weight > b.Weight end
             if r274 == r7_4[3] and a.Mutation ~= b.Mutation then return a.Mutation > b.Mutation end
             if r274 == r7_4[4] and a.Value ~= b.Value then return a.Value > b.Value end
@@ -833,41 +1155,77 @@ do
         return out
     end
 
-    -- movement/pathfinder helpers
-    local r311 = 6
-    local r314, r315, r318, r319, r322
-    do
-        local r312, r313 = nil, nil
-        r314 = function(part, target, speed, dt, mem)
-            local delta = target - part.Position
-            local dist = delta.Magnitude
-            local step = math.max(dt, 1/240)
-            local v = Vector3.zero
-            if dist > 0.01 then v = delta.Unit * math.min(speed, dist / step) end
-            local v2 = v + Vector3.new(0, workspace.Gravity * step * 0.5, 0)
-            if dist > 2 then
-                if not mem.mark then mem.mark = dist; mem.clock = 0 end
-                mem.clock = mem.clock + dt
-                if mem.clock >= 0.4 then
-                    if mem.mark - dist < speed * 0.1 then
-                        pcall(function() part.CFrame = part.CFrame + delta.Unit * math.min(dist, speed * step) end)
+    function r307(cat)
+        local dir = r234.Assets and r234.Assets.Directory
+        local a = type(dir) == "table" and dir[tostring(cat)] or nil
+        local rar = type(a) == "table" and type(a.Rarity) == "table" and a.Rarity or nil
+        local out = {}
+        if rar then rar = tonumber(rar.RarityNumber or rar.Rank) end
+        out.RarityNumber = rar or 0
+        out.EarningRate = type(a) == "table" and tonumber(a.EarningRate) or 0
+        return out
+    end
+    function r308(muts)
+        local m = r234.Mutations
+        if type(m) == "table" and type(m.EarningsFor) == "function" then
+            local ok, v = pcall(m.EarningsFor, type(muts) == "table" and muts or {})
+            if ok and type(v) == "number" then return v end
+        end
+        return 1
+    end
+    function r309(cat, scale)
+        local er = r234.EggRecords
+        if type(er) == "table" and type(er.WeightKgForScale) == "function" then
+            local ok, v = pcall(er.WeightKgForScale, cat, scale)
+            if ok and type(v) == "number" then return v end
+        end
+        return 0
+    end
+
+    local r301, r302 = nil, 0
+    local function r303(skipFirst)
+        local out = {}
+        local st = r234.EggState
+        if type(st) ~= "table" or type(st.ReadFieldEggs) ~= "function" then return out end
+        task.spawn(function()
+            local ok, snap = pcall(st.ReadFieldEggs)
+            if ok and type(snap) == "table" and type(snap.Records) == "table" then
+                local prefix = "FirstAreaEgg_" .. tostring(r232.UserId)
+                for _, rec in pairs(snap.Records) do
+                    if type(rec) == "table" and type(rec.Uid) == "string" then
+                        if not (skipFirst and string.sub(rec.Uid, 1, #prefix) == prefix) then
+                            out[rec.Uid] = true
+                        end
                     end
-                    mem.mark = dist; mem.clock = 0
                 end
-            else
-                mem.mark = nil
             end
-            pcall(function()
-                part.AssemblyLinearVelocity = v2
-                part.AssemblyAngularVelocity = Vector3.zero
-            end)
-            return dist <= 0.5
+        end)
+        return out
+    end
+    local function r305()
+        if r301 and r302 == math.huge then return end
+        r301 = r303(true)
+        r302 = math.huge
+        table.clear(r268); table.clear(r270); table.clear(r269); table.clear(r292)
+        r294 = nil
+    end
+    local function r306()
+        if not r301 then return false end
+        if os.clock() >= r302 then r301 = nil; return false end
+        local cur = r303()
+        if next(cur) == nil then return true end
+        local seen, unseen = false, false
+        for k in pairs(cur) do
+            if r301[k] then seen = true else unseen = true end
         end
-        r315 = function()
-            local r = r247.Root()
-            if r then pcall(function() r.AssemblyLinearVelocity = Vector3.zero; r.AssemblyAngularVelocity = Vector3.zero end) end
-        end
-        local r316, r317 = nil, {}
+        if not seen then r301 = nil; return false end
+        return not unseen
+    end
+
+    -- fly to pos
+    local r318, r319, r322, r314, r315
+    do
+        local r312, r313, r316, r317 = nil, nil, nil, {}
         r318 = function()
             r312 = nil
             if r313 then r313:Disconnect(); r313 = nil end
@@ -892,11 +1250,22 @@ do
                     r.AssemblyAngularVelocity = Vector3.zero
                 end)
             end)
-            r316 = r137.PreSimulation:Connect(function(dt)
-                if not r312 or r319() or r247.AntiGuard.Busy then return end
-                local r = r247.Root()
-                if r then r314(r, r312, r277, dt, r317) end
+        end
+        r314 = function(part, target, speed, dt, mem)
+            local delta = target - part.Position
+            local dist = delta.Magnitude
+            local step = math.max(dt, 1/240)
+            local v = dist > 0.01 and delta.Unit * math.min(speed, dist / step) or Vector3.zero
+            local v2 = v + Vector3.new(0, workspace.Gravity * step * 0.5, 0)
+            pcall(function()
+                part.AssemblyLinearVelocity = v2
+                part.AssemblyAngularVelocity = Vector3.zero
             end)
+            return dist <= 0.5
+        end
+        r315 = function()
+            local r = r247.Root()
+            if r then pcall(function() r.AssemblyLinearVelocity = Vector3.zero; r.AssemblyAngularVelocity = Vector3.zero end) end
         end
     end
     r240(r318)
@@ -910,47 +1279,26 @@ do
         if h then h.PlatformStand = false end
     end
 
-    -- r347: fly to position
-    local r347 = function(target, abortFn, needCarry, speedOverride, watchDisplace, customCancel)
+    local r347 = function(target, abortFn, needCarry, speedOverride)
         r318()
         local r = r247.Root()
         if not r then return false end
         local char = r232.Character
         local startPos = r.Position
         local mem = {}
-        local done, reason = nil, nil
-        local elapsed = 0
-
-        local function step(dt)
-            elapsed = elapsed + dt
-            if r295(abortFn) then done = false; return nil end
-            if needCarry and not r247.Steal.Carrying then done = false; reason = "dropped"; return nil end
-            if customCancel then
-                local r_ = customCancel()
-                if r_ then done = false; reason = r_; return nil end
-            end
-            local cur = r247.Root()
-            if not cur or elapsed >= 25 or r232.Character ~= char then done = false; reason = "respawned"; return nil end
-            return cur
-        end
-
+        local done, elapsed = nil, 0
         local c1 = r137.Heartbeat:Connect(function(dt)
-            if done ~= nil or r247.AntiGuard.Busy then return end
-            local cur = step(dt)
-            if not cur then return end
-            if (cur.Position - startPos).Magnitude > r311 then
-                if watchDisplace then done = false; reason = "displaced"; return end
-                startPos = cur.Position
-            end
-            local baseSpeed = (speedOverride or r275) * (os.clock() < (r247.SafeCarry.SlowUntil or 0) and r247.SafeCarry.SlowFactor or 1)
-            local spd = baseSpeed
-            if r247.SafeCarry.Enabled and r247.SafeCarry.Pace then
-                spd = math.min(baseSpeed, r247.SafeCarry.Pace())
-            end
+            if done ~= nil then return end
+            elapsed = elapsed + dt
+            if r295(abortFn) then done = false; return end
+            if needCarry and not r247.Steal.Carrying then done = false; return end
+            local cur = r247.Root()
+            if not cur or elapsed >= 25 or r232.Character ~= char then done = false; return end
+            local spd = speedOverride or r275
             local delta = target - startPos
-            local steplen = spd * dt
-            local arrived = delta.Magnitude <= math.max(steplen, 0.05)
-            startPos = arrived and target or startPos + delta.Unit * steplen
+            local step = spd * dt
+            local arrived = delta.Magnitude <= math.max(step, 0.05)
+            startPos = arrived and target or startPos + delta.Unit * step
             local flat = Vector3.new(delta.X, 0, delta.Z)
             local rot = flat.Magnitude > 0.05 and CFrame.lookAt(Vector3.zero, flat.Unit) or cur.CFrame.Rotation
             pcall(function()
@@ -960,91 +1308,42 @@ do
             end)
             if arrived then done = true end
         end)
-
         local c2 = r137.PreSimulation:Connect(function(dt)
-            if done ~= nil or r247.AntiGuard.Busy then return end
-            local cur = step(dt)
-            if not cur then return end
-            local baseSpeed = (speedOverride or r275) * (os.clock() < (r247.SafeCarry.SlowUntil or 0) and r247.SafeCarry.SlowFactor or 1)
-            local spd = baseSpeed
-            if r247.SafeCarry.Enabled and r247.SafeCarry.Pace then
-                spd = math.min(baseSpeed, r247.SafeCarry.Pace())
-            end
+            if done ~= nil then return end
+            if r295(abortFn) then done = false; return end
+            if needCarry and not r247.Steal.Carrying then done = false; return end
+            local cur = r247.Root()
+            if not cur then done = false; return end
+            local spd = speedOverride or r275
             if r314(cur, target, spd, dt, mem) then done = true end
         end)
-
         while done == nil do r137.Heartbeat:Wait() end
         c1:Disconnect(); c2:Disconnect()
         if done and r322 then r322(target, speedOverride ~= nil) end
-        return done, reason
+        return done
     end
 
-    -- r336: verify carry
-    local r326 = 0.6
-    local function currentCarryUid()
-        local u = r247.Steal.CarryUid
-        return type(u) == "string" and u or nil
-    end
-    local function matchesCarryUid(uid)
-        local cur = currentCarryUid()
-        if not cur or type(uid) ~= "string" then return true end
-        return cur == uid
-    end
-    local function stillInList(uid)
-        if type(uid) ~= "string" then return false end
-        local list = r310(false, true)
-        if #list == 0 then return true end
-        for _, e in ipairs(list) do if e.Uid == uid then return true end end
-        return false
-    end
-    local function dropHeld(abortUid)
-        local st = r234.EggState
-        if type(st) == "table" and type(st.DropFieldEgg) == "function" then
-            pcall(st.DropFieldEgg, "PlayerRequest")
-        end
-        local guard = 0
-        while r247.Steal.Carrying and guard < 1 and not r295(abortUid) do
-            guard += r137.Heartbeat:Wait()
-        end
-    end
-    local r336 = function(expectedUid, abortUid)
-        local g = 0
-        while not r247.Steal.Carrying and g < r326 and not r295(abortUid) do
-            g += r137.Heartbeat:Wait()
-        end
-        if not r247.Steal.Carrying then return false end
-        if matchesCarryUid(expectedUid) then return true end
-        local cur = currentCarryUid()
-        if stillInList(cur) then return true end
-        dropHeld(abortUid)
-        return false
-    end
-
-    -- r330: find SmartPromptPart near pos
+    -- quick grab via prompt
     local function smartPromptNear(uid, pos, radius)
         radius = radius or 14
-        local best, bestPos, bestDist = nil, nil, radius
+        local best, bestDist = nil, radius
         for _, p in ipairs(workspace:GetChildren()) do
             if p.Name == "SmartPromptPart" and p:IsA("BasePart") then
                 local cp = p:FindFirstChild("CarryAreaEgg")
                 if cp and cp:IsA("ProximityPrompt") then
                     local d = (p.Position - pos).Magnitude
-                    if d < bestDist then bestDist = d; best = cp; bestPos = p end
+                    if d < bestDist then bestDist = d; best = cp end
                 end
             end
         end
-        return best, bestPos
+        return best
     end
-
     local function firePrompt(prompt)
         if not prompt then return false end
         pcall(function() prompt.HoldDuration = 0 end)
-        if typeof(fireproximityprompt) == "function" then
-            return pcall(fireproximityprompt, prompt)
-        end
+        if typeof(fireproximityprompt) == "function" then return pcall(fireproximityprompt, prompt) end
         return false
     end
-
     local function carryFallback(uid)
         local st = r234.EggState
         if type(uid) == "string" and type(st) == "table" and type(st.CarryFieldEgg) == "function" then
@@ -1052,8 +1351,7 @@ do
         end
     end
 
-    -- r337: grab egg
-    local r337 = function(egg, abortUid)
+    local function r337(egg, abortUid)
         local pos = typeof(egg.CFrame) == "CFrame" and egg.CFrame.Position or nil
         if not pos then return false end
         local elapsed, promptCooldown, misses = 0, math.huge, 0
@@ -1080,7 +1378,6 @@ do
         return r247.Steal.Carrying == true
     end
 
-    -- r340: confirm carry at server
     local function r340(uid, abortUid)
         if r247.Steal.Carrying then return true end
         local rf = r182:FindFirstChild("RF/EggWorld/AskFieldEggSnapshot")
@@ -1104,128 +1401,43 @@ do
         return r247.Steal.Carrying == true
     end
 
-    local r342 = function(list)
-        local best, bd = nil, math.huge
-        for _, e in ipairs(list) do
-            local r = r247.Root()
-            local p = typeof(e.CFrame) == "CFrame" and e.CFrame.Position or nil
-            if r and p then
-                local d = (r.Position - p).Magnitude
-                if d < bd then bd = d; best = e end
-            end
-        end
-        return best, bd
+    local r326 = 0.6
+    local function currentCarryUid()
+        local u = r247.Steal.CarryUid
+        return type(u) == "string" and u or nil
     end
-
-    local r344 = 90
-    local r354 = 20
-
-    -- r363: other player holds?
-    local function otherHolds(uid)
-        local m = workspace:FindFirstChild(uid)
-        if not m then return false end
-        for _, c in ipairs(m:GetDescendants()) do
-            if c:IsA("JointInstance") or c:IsA("WeldConstraint") or c:IsA("RigidConstraint") then
-                local ok, p0, p1 = pcall(function() return c.Part0, c.Part1 end)
-                if ok then
-                    for _, part in ipairs({ p0, p1 }) do
-                        if typeof(part) == "Instance" and not part:IsDescendantOf(m) then
-                            local anc = part:FindFirstAncestorOfClass("Model")
-                            if anc and anc ~= r232.Character and r136:GetPlayerFromCharacter(anc) then return true end
-                        end
-                    end
-                end
-            end
+    local function matchesCarryUid(uid)
+        local cur = currentCarryUid()
+        if not cur or type(uid) ~= "string" then return true end
+        return cur == uid
+    end
+    local function stillInList(uid)
+        if type(uid) ~= "string" then return false end
+        local list = r310(false, true)
+        if #list == 0 then return true end
+        for _, e in ipairs(list) do if e.Uid == uid then return true end end
+        return false
+    end
+    local function dropHeld(abortUid)
+        local st = r234.EggState
+        if type(st) == "table" and type(st.DropFieldEgg) == "function" then
+            pcall(st.DropFieldEgg, "PlayerRequest")
         end
+        local g = 0
+        while r247.Steal.Carrying and g < 1 and not r295(abortUid) do g += r137.Heartbeat:Wait() end
+    end
+    local function r336(expectedUid, abortUid)
+        local g = 0
+        while not r247.Steal.Carrying and g < r326 and not r295(abortUid) do
+            g += r137.Heartbeat:Wait()
+        end
+        if not r247.Steal.Carrying then return false end
+        if matchesCarryUid(expectedUid) then return true end
+        if stillInList(currentCarryUid()) then return true end
+        dropHeld(abortUid)
         return false
     end
 
-    -- r365: follow falling egg
-    local function r365(abortUid, overrideUid)
-        local uid = overrideUid or r247.Steal.CarryUid
-        if type(uid) ~= "string" then return false end
-        r318()
-        local followPos, velocity = nil, Vector3.zero
-        local conn = r137.PreSimulation:Connect(function(dt)
-            local r = r247.Root()
-            if not r or not followPos or r247.Steal.Carrying or r295(abortUid) then return end
-            if r319() then return end
-            local step = math.max(dt, 1/240)
-            local desired = velocity + (followPos - r.Position) / math.max(0.08, step)
-            local cap = r247.SafeCarry.Enabled and r247.SafeCarry.Pace() or (r277 + velocity.Magnitude)
-            if cap < desired.Magnitude then desired = desired.Unit * cap end
-            local v = desired + Vector3.new(0, workspace.Gravity * step * 0.5, 0)
-            pcall(function()
-                r.AssemblyLinearVelocity = v
-                r.AssemblyAngularVelocity = Vector3.zero
-            end)
-        end)
-        local t, lastPos, lastAt = 0, nil, nil
-        local promptCooldown = math.huge
-        local seenGone = 0
-        while t < 30 do
-            if r295(abortUid) then conn:Disconnect(); return false end
-            if r247.Steal.Carrying then
-                if not r247.Steal.WrongEgg(uid) then conn:Disconnect(); return true end
-            end
-            local r = r247.Root()
-            if not r then conn:Disconnect(); return false end
-            local pos = nil
-            local m = workspace:FindFirstChild("AreaEggSlotsClient")
-            m = m and m:FindFirstChild(uid)
-            if m then local ok, pv = pcall(function() return m:GetPivot().Position end); if ok then pos = pv end end
-            if not pos then
-                local rf = r182:FindFirstChild("RF/EggWorld/AskFieldEggSnapshot")
-                if rf and rf:IsA("RemoteFunction") and promptCooldown >= 0.5 then
-                    promptCooldown = 0
-                    local ok, snap = pcall(rf.InvokeServer, rf)
-                    if ok and type(snap) == "table" and type(snap.Records) == "table" then
-                        for _, rec in pairs(snap.Records) do
-                            if type(rec) == "table" and rec.Uid == uid and typeof(rec.BottomCFrame) == "CFrame" then
-                                pos = rec.BottomCFrame.Position
-                                break
-                            end
-                        end
-                        local found = false
-                        for _, rec in pairs(snap.Records) do if type(rec) == "table" and rec.Uid == uid then found = true end end
-                        if not found then seenGone += 1 else seenGone = 0 end
-                        if seenGone >= 4 then conn:Disconnect(); return false end
-                    end
-                end
-            else promptCooldown = 0.5 end
-            if pos then
-                local now = os.clock()
-                if lastPos and lastAt then
-                    local d = (pos - lastPos) / math.max(now - lastAt, 1/240)
-                    if d.Magnitude < 3000 then velocity = velocity:Lerp(d, 0.3) end
-                end
-                followPos = pos + Vector3.new(0, 3, 0)
-                lastPos = pos; lastAt = now
-                if (r.Position - followPos).Magnitude <= r354 and promptCooldown >= 0.1 then
-                    local prompt = smartPromptNear(uid, pos - Vector3.new(0, 3, 0), 6)
-                    if prompt then
-                        pcall(function() prompt.HoldDuration = 0 end)
-                        firePrompt(prompt)
-                    else
-                        task.spawn(carryFallback, uid)
-                    end
-                    promptCooldown = 0
-                end
-            end
-            if otherHolds(uid) then
-                -- keep chasing
-            end
-            r137.Heartbeat:Wait()
-            t += 1/60
-            promptCooldown += 1/60
-        end
-        conn:Disconnect()
-        r315()
-        return r247.Steal.Carrying == true
-    end
-
-    -- r366: fetch egg (fly + grab)
-    local function insideBaseOr(pos) return r247.InsideBase(pos) end
     local r3_6 = function()
         local paths = {
             { Path = { "GearGiver_Slap", "Podium" }, Offset = Vector3.new(-16.415, 21.072, -6.106) },
@@ -1259,144 +1471,15 @@ do
         return true
     end
 
-    -- r371: deliver home
     local r371 = function(abortUid)
-        -- anti guard
-        local ag = r247.AntiGuard
-        if ag.Enabled then
-            local t = 0
-            while not ag.Busy and t < 1 and not r295(abortUid) do t += r137.Heartbeat:Wait() end
-            local had = ag.Busy
-            local t2 = 0
-            while ag.Busy and t2 < 30 and not r295(abortUid) do t2 += r137.Heartbeat:Wait() end
-            if had then
-                local t3, t4 = 0, 0
-                while t3 < 10 and not r295(abortUid) do
-                    local ragdolled = r319()
-                    local held = (function() local ok, v = pcall(r247.Steal.HeldByMe); return ok and v == true end)()
-                    local okToMove = not ragdolled
-                    if okToMove and not held then break end
-                    if okToMove and held and not ag.Busy then
-                        t4 += r137.Heartbeat:Wait()
-                        if t4 >= 0.3 then break end
-                    else
-                        t3 += r137.Heartbeat:Wait()
-                        t4 = 0
-                    end
-                end
-                local ok, v = pcall(r247.Steal.HeldByMe)
-                if ok and not v then r247.Steal.Carrying = false end
-                local home = r3_6()
-                local heightTarget = home and r247.SafeCarry.Enabled and r247.SafeCarry.CarryStyle ~= "Walk" and r247.SafeCarry.Height > 0.5 and home.Y + r247.SafeCarry.Height or nil
-                local t5 = 0
-                while t5 < 0.8 and r247.Steal.Carrying and not r295(abortUid) do
-                    local r = r247.Root()
-                    if r and heightTarget then
-                        local dy = heightTarget - r.Position.Y
-                        local vy = t5 < 0.6 and math.clamp(dy / math.max(0.6 - t5, 0.1), -120, 120) or math.clamp(dy / 0.2, -30, 30)
-                        pcall(function() r.AssemblyLinearVelocity = Vector3.new(0, vy, 0) end)
-                    end
-                    t5 += r137.Heartbeat:Wait()
-                end
-                local ok2, v2 = pcall(r247.Steal.HeldByMe)
-                if ok2 and not v2 then r247.Steal.Carrying = false else r247.SafeCarry.SlowUntil = os.clock() + 2 end
-            end
-        end
-
         local t = 0
         while not r247.Steal.Carrying and t < r326 and not r295(abortUid) do t += r137.Heartbeat:Wait() end
-        if not r247.Steal.Carrying then
-            if not r365(abortUid) then return false end
-        end
-
-        if r247.SafeCarry.Enabled then
-            -- full safe carry home
-            local sc = r247.SafeCarry
-            local home = r3_6()
-            local r = r247.Root()
-            if not home or not r then return false end
-            r318()
-            local sep = (workspace:FindFirstChild("World") or workspace:FindFirstChild("__OBJECTS"))
-            sep = sep and sep:FindFirstChild("Areas")
-            sep = sep and sep:FindFirstChild("SeparationLine")
-            local edgeX = (sep and sep:IsA("BasePart") and sep.Position.X or 552) - 7
-            local ch = r232.Character
-            local hm = ch and ch:FindFirstChildOfClass("Humanoid")
-            if hm then hm.PlatformStand = false end
-            local startT = os.clock()
-            local speedNow = 0
-
-            local function refreshPlan()
-                local rr = r247.Root()
-                if not rr then return end
-                local plan, ok, base, max, guard = sc.Plan and sc.Plan(r247.Steal.CarryAreaId, (Vector3.new(rr.Position.X, 0, rr.Position.Z) - Vector3.new(home.X, 0, home.Z)).Magnitude + math.max(0, sc.Height) * 2, sc.Mult) or (r275 * sc.CarryScale), true, r275 * sc.CarryScale, r275 * sc.CarryScale * sc.SpeedRatio, 0
-                speedNow = plan * sc.CarryScale
-                sc.PlanOk = ok
-                sc.FloorSpeed = sc.BeatGuard and math.min(guard + math.max(sc.GuardMargin, 1), max) or 0
-            end
-            refreshPlan()
-
-            local lastSampleT = startT
-            local stride = { Clock = 0, Factor = 1, Target = 1, NextShift = 0, Phase = math.random()*math.pi*2, Period = 2 + math.random()*2.5, PauseUntil = 0, Lane = 0 }
-            local laneZ = (r.Position.Z) + stride.Lane
-
-            while r247.Steal.Carrying and not r295(abortUid) do
-                local rr = r247.Root()
-                if not rr then return false end
-                local now = os.clock()
-                local dt = math.max(now - lastSampleT, 1/240)
-                -- walking
-                if hm and rr.Position.X > edgeX + 2 then
-                    local target = Vector3.new(edgeX, rr.Position.Y, math.clamp(laneZ, -425, -300))
-                    local delta = Vector3.new(target.X - rr.Position.X, 0, target.Z - rr.Position.Z)
-                    if delta.Magnitude > 0.5 then
-                        local sp = speedNow
-                        local unit = delta.Unit
-                        pcall(function()
-                            rr.AssemblyLinearVelocity = Vector3.new(unit.X * sp, rr.AssemblyLinearVelocity.Y, unit.Z * sp)
-                            if sc.RunAnimate then hm:Move(unit, false) end
-                        end)
-                    else
-                        pcall(function() rr.AssemblyLinearVelocity = Vector3.new(0, rr.AssemblyLinearVelocity.Y, 0) end)
-                    end
-                else
-                    local target = home
-                    local delta = target - rr.Position
-                    if delta.Magnitude < 2 then break end
-                    local unit = delta.Unit
-                    pcall(function()
-                        rr.AssemblyLinearVelocity = Vector3.new(unit.X * speedNow, rr.AssemblyLinearVelocity.Y, unit.Z * speedNow)
-                        if sc.RunAnimate and hm then hm:Move(Vector3.new(unit.X, 0, unit.Z), false) end
-                    end)
-                end
-                lastSampleT = now
-                r137.Heartbeat:Wait()
-                if r247.Steal.LastDelivered >= startT then return true end
-                if r247.Steal.LastFailed >= startT then return false end
-                if not r247.Steal.Carrying then
-                    -- dropped, re-grab once
-                    if not r365(abortUid) then return false end
-                    startT = os.clock()
-                end
-            end
-
-            if r247.Steal.Carrying then
-                task.wait(0.2)
-                local st = r234.EggState
-                if type(st) == "table" and type(st.DropFieldEgg) == "function" then
-                    pcall(st.DropFieldEgg, "PlayerRequest")
-                end
-            end
-            return r247.Steal.LastDelivered >= startT
-        end
-
-        -- non-safe path (fly home)
+        if not r247.Steal.Carrying then return false end
         local home = r3_6()
         local r = r247.Root()
         if not home or not r then return false end
         local flyY = math.max(r.Position.Y, home.Y) + r276
-        local target1 = Vector3.new(r.Position.X + (home.X - r.Position.X) * 0.25, r.Position.Y + (flyY - r.Position.Y) * 0.7, r.Position.Z + (home.Z - r.Position.Z) * 0.25)
-        if not r347(target1, abortUid, true, nil) then return false end
+        if not r347(Vector3.new(r.Position.X + (home.X - r.Position.X) * 0.25, r.Position.Y + (flyY - r.Position.Y) * 0.7, r.Position.Z + (home.Z - r.Position.Z) * 0.25), abortUid, true, nil) then return false end
         if not r347(Vector3.new(home.X, flyY, home.Z), abortUid, true, nil) then return false end
         if not r347(home, abortUid, true, nil) then return false end
         if not r247.Steal.Carrying then return false end
@@ -1421,17 +1504,6 @@ do
         return true
     end
 
-    -- r379: main steal runner
-    local r374 = false
-    local r375, r376, r378 = 0.5, 0.6, 0
-    local r373 = function(egg)
-        if not egg then return "None" end
-        local scaled = string.format("%s  %.2fx  |  value %.2f  |  %s", tostring(egg.Category), tonumber(egg.Scale) or 0, egg.Value, tostring(egg.AreaId))
-        if egg.State == "Dropped" then scaled = scaled .. "  |  dropped" end
-        if egg.State == "Carried" then scaled = scaled .. "  |  carried" end
-        return scaled
-    end
-
     local r379 = function()
         local session = r291
         r247.Steal.Active = true
@@ -1439,22 +1511,16 @@ do
         if not r247.Steal.Carrying then r247.Steal.CarryUid = nil end
 
         local list = r310(false, true)
-        local target, carried, skipped = nil, nil, nil
+        local target
         for _, e in ipairs(list) do
-            if e.State == "Carried" then
-                carried = carried or e
-            else
+            if e.State ~= "Carried" then
                 local reason = r247.SafeCarry.Unsafe(e)
-                if reason then skipped = skipped or reason else target = e; break end
+                if not reason then target = e; break end
             end
         end
         r294 = target and target.Uid or nil
         r247.Steal.Wanted = target ~= nil
-
-        if not target then
-            r247.Steal.Active = false
-            return false
-        end
+        if not target then r247.Steal.Active = false; return false end
 
         if not r247.ClaimMovement("steal") then
             r247.Steal.Active = false
@@ -1462,7 +1528,6 @@ do
         end
 
         if r247.Treadmill.Riding or r247.OnBelt() then r247.ExitBelt() end
-        r374 = true
         r247.HoldBelt()
 
         local function finish()
@@ -1472,48 +1537,22 @@ do
             return true
         end
 
-        local r = r247.Root()
-        local pos = typeof(target.CFrame) == "CFrame" and target.CFrame.Position or nil
-        if r and pos then
-            local close = (pos - r.Position).Magnitude <= r354
-            local sameArea = r232:GetAttribute("AreaId") == target.AreaId
-            if close or sameArea then
-                r366(target, session)
-                if r336(target.Uid, session) then
-                    r371(session)
-                end
-                return finish()
-            end
-        end
-
-        -- approach
-        local saved = r247.SafeCarry.Approach
-        local approachRun = saved == "Run"
-        if approachRun then
-            -- Safecarry RunTo
-            local ok = pcall(function()
-                -- run to egg
-                if not r347(pos + Vector3.new(0, 3, 0), session, nil, r277) then error("fail") end
-                if not r337(target, session) and not r295(session) then r337(target, session) end
-                if r247.Steal.Carrying then r371(session) end
-            end)
-            r323()
-            r247.Steal.Active = false
-            r247.Steal.LastFinishedAt = os.clock()
-            return true
-        end
-
-        -- fallback: default approach (fetch + deliver)
-        local session2 = session
-        if r366(target, session2) then
-            if r336(target.Uid, session2) then r371(session2) end
+        if r366(target, session) then
+            if r336(target.Uid, session) then r371(session) end
         end
         return finish()
     end
 
-    local function worker()
+    r247.SafeCarry.Unsafe = function(entry)
+        local sc = r247.SafeCarry
+        if not sc.Enabled or type(entry) ~= "table" or not entry.Uid or not sc.Blocked[entry.Uid] then return nil end
+        return string.format("the guard caught you with this %s before, skipping it", tostring(entry.Category))
+    end
+
+    local r378 = 0
+    local worker = function()
         if not r247.Toggle(r16_2, false) then return false end
-        local waitTime, kind, refTime = r299()
+        local waitTime, kind = r299()
         if waitTime then
             if kind == "night" then r305() end
             r247.Movement.StealFirst = true
@@ -1529,24 +1568,20 @@ do
         if r301 and r302 == math.huge then r302 = os.clock() + 8 end
         if r247._stealRunning then return true end
         if r306() then r244.Wake(); return false end
-
         local mOwner = r247.Movement.Owner
         if mOwner and mOwner ~= "steal" and mOwner ~= "treadmill" then
             r247.Movement.StealFirst = true
             return true
         end
-
         if os.clock() < r378 then return true end
         r247.Movement.StealFirst = false
         r247._stealRunning = true
-
         task.spawn(function()
             local ok = pcall(r379)
-            if r374 then r374 = false; r247.ReleaseBelt() end
             if not ok then r323(); r247.Steal.Active = false end
             r247._stealRunning = false
             r247.ReleaseMovement("steal")
-            r378 = os.clock() + r376
+            r378 = os.clock() + 0.6
             r244.Wake()
         end)
         return true
@@ -1570,7 +1605,6 @@ do
         end,
     })
 
-    -- target areas
     r243(r26:CreateMultiDropdown({
         Name = "Target Areas",
         Options = r150,
@@ -1623,17 +1657,6 @@ do
         end,
     })
 
-    r26:CreateDropdown({
-        Name = "Travel Method",
-        Options = { "Tween", "Teleport" },
-        Default = "Tween",
-        SubOf = r247.SafeCarry.Handle,
-        Callback = function(v)
-            if v == "Tween" then r247.SafeCarry.Approach = "Run"
-            elseif v == "Teleport" then r247.SafeCarry.Approach = "Ragdoll Jump" end
-        end,
-    })
-
     r26:CreateSlider({
         Name = "Carry Speed",
         Note = "Lower it if you get Delivery failed",
@@ -1642,104 +1665,7 @@ do
         Callback = function(v) r247.SafeCarry.CarryScale = math.clamp(tonumber(v) or 100, 80, 120) / 100 end,
     })
 
-    r26:CreateSlider({
-        Name = "Egg Tween Speed",
-        Min = 50, Max = 300, Default = 115, Increment = 5, Unit = "%",
-        SubOf = r247.SafeCarry.Handle,
-        Callback = function(v) r247.SafeCarry.RunSpeed = math.clamp(tonumber(v) or 115, 50, 300) / 100 end,
-    })
-
-    r244.Add(worker)
-
-    r247.Steal.HeldByMe = function()
-        local uid = r247.Steal.CarryUid
-        local c = r232.Character
-        if type(uid) ~= "string" or not c then return false end
-        local m = workspace:FindFirstChild(uid)
-        if not m then return false end
-        for _, j in ipairs(m:GetDescendants()) do
-            if j:IsA("WeldConstraint") or j:IsA("JointInstance") then
-                local ok, p0, p1 = pcall(function() return j.Part0, j.Part1 end)
-                if ok and ((p0 and p0:IsDescendantOf(c)) or (p1 and p1:IsDescendantOf(c))) then return true end
-            end
-        end
-        return false
-    end
-
-    -- carry state tracking
-    do
-        local t = 0
-        local hb = r137.Heartbeat:Connect(function(dt)
-            t += dt
-            if t < 0.2 then return end
-            t = 0
-            local s = r247.Steal
-            if not s.Carrying then
-                if s.GuessedDrop then
-                    local ok, v = pcall(s.HeldByMe)
-                    if ok and v then s.GuessedDrop = false; s.Carrying = true; s.HeldSeenAt = os.clock() end
-                end
-                return
-            end
-            local ok, v = pcall(s.HeldByMe)
-            if not ok or v then s.HeldSeenAt = os.clock(); return end
-            if os.clock() - (s.HeldSeenAt or 0) > 0.8 then
-                s.Carrying = false
-                s.GuessedDrop = true
-                s.LastFinishedAt = os.clock()
-                r244.Wake()
-            end
-        end)
-        r240(function() hb:Disconnect() end)
-    end
-
-    do
-        local st = r234.EggState
-        local ev = type(st) == "table" and st.CarryChanged or nil
-        if type(ev) == "table" and type(ev.Connect) == "function" then
-            local ok, conn = pcall(ev.Connect, ev, function(info)
-                local carrying = type(info) == "table" and info.IsCarrying == true
-                if r247.Steal.Carrying and not carrying then r247.Steal.LastFinishedAt = os.clock() end
-                r247.Steal.GuessedDrop = false
-                if carrying then r247.Steal.HeldSeenAt = os.clock() end
-                if carrying and type(info.Uid) == "string" then
-                    r247.Steal.CarryUid = info.Uid
-                    r247.Steal.CarryAreaId = info.AreaId
-                    local mult = tonumber(info.SpeedMultiplier)
-                    if mult and mult > 0 then
-                        r247.SafeCarry.Mult = mult
-                        r247.SafeCarry.Category = info.AssetCategory
-                        if info.AssetCategory ~= nil then
-                            local k = tostring(info.AssetCategory)
-                            r247.SafeCarry.Seen[k] = math.min(r247.SafeCarry.Seen[k] or mult, mult)
-                        end
-                    end
-                end
-                r247.Steal.Carrying = carrying
-                r244.Wake()
-            end)
-            if ok and conn then r240(function() pcall(function() conn:Disconnect() end) end) end
-        end
-    end
-
-    do
-        local ok1, verdict = pcall(function() return r182:FindFirstChild("RE/EggWorld/FieldEggRedeemVerdict") end)
-        local ok2, alerts = pcall(function() return r182:FindFirstChild("RE/Alerts/Raise") end)
-        if ok1 and verdict and verdict:IsA("RemoteEvent") then
-            local conn = verdict.OnClientEvent:Connect(function() r247.SafeCarry.LastDelivered = os.clock() end)
-            r240(function() conn:Disconnect() end)
-        end
-        if ok2 and alerts and alerts:IsA("RemoteEvent") then
-            local conn = alerts.OnClientEvent:Connect(function(msg)
-                if type(msg) == "table" and type(msg.Text) == "string" and string.find(msg.Text, "Delivery failed", 1, true) then
-                    r247.SafeCarry.LastFailed = os.clock()
-                end
-            end)
-            r240(function() conn:Disconnect() end)
-        end
-    end
-
-    r26:CreateLabel({ Name = "Anti Guard Title", Text = "Anti Guard" })
+    r26:CreateLabel({ Name = "Anti Guard Divider", Text = "───── Anti Guard ─────" })
 
     r247.AntiGuard.PanelHandle = r26:CreateToggle({
         Name = "Anti Guard Panel",
@@ -1757,11 +1683,13 @@ do
         r247.AntiGuard.Handle:Subscribe(function(v)
             if type(v) ~= "boolean" then v = r247.AntiGuard.Handle:Get() end
             r247.AntiGuard.Enabled = v == true
-            if r247.AntiGuard.Render then r247.UiDefer(function() pcall(r247.AntiGuard.Render, false) end) end
+            if r247.AntiGuard.Render then
+                r247.UiDefer(function() pcall(r247.AntiGuard.Render, false) end)
+            end
         end)
     end)
 
-    r247._stealSection = r26
+    r244.Add(worker)
 end
 
 -- ============= ANTI GUARD PANEL =============
@@ -1771,37 +1699,14 @@ do
     local r1550 = r247.AntiGuard
     local r163_4 = game:GetService("TweenService")
 
-    local r1551 = {
-        Target = "line", LineOffset = 8, Height = 45, OffsetX = -90, OffsetZ = -35,
-        Jitter = 0, Point = false, Disguise = true, Limp = true, Facing = "Zero",
-        Freeze = false, StartAt = 0,
-        Steps = { { At = 0.1, To = "home" }, { At = 0.33, To = "home" }, { At = 0.56, To = "home" }, { At = 0.75, To = "start" } },
-        ReleaseAt = 0.8, WeldScanGap = 0.03, BusyLimit = 2.5,
-    }
-
-    local function presetSteps(count, start, step, endAt, releaseAt, busyLimit)
-        local steps = {}
-        for i = 1, count do steps[#steps+1] = { At = start + step * (i-1), To = "home" } end
-        steps[#steps+1] = { At = endAt, To = "start" }
-        return {
-            Target = "home", LineOffset = 8, Height = 0, OffsetX = 0, OffsetZ = 0,
-            Jitter = 0, Point = false, Disguise = true, Limp = false, Facing = "Zero",
-            Freeze = true, StartAt = 0, StartRandom = 0, HopRandom = 0.085, HoldRandom = 0.395,
-            Steps = steps, ReleaseAt = releaseAt, WeldScanGap = 0.03, BusyLimit = busyLimit,
-        }
-    end
-
-    local r1552 = { LightDark = r1551, Default = presetSteps(25, 0, 0.05, 1.27, 1.52, 2.5) }
-    pcall(function() getgenv().OxioAntiGuard = r1552 end)
-
-    -- panel colors: hitam + putih
+    -- White outline colors
     local r1554 = {
         Card = Color3.fromRGB(15, 15, 19),
         CardTop = Color3.fromRGB(24, 22, 28),
         Stroke = Color3.fromRGB(48, 46, 56),
         Text = Color3.fromRGB(240, 238, 244),
         AccentA = Color3.fromRGB(255, 255, 255),
-        AccentB = Color3.fromRGB(220, 220, 230),
+        AccentB = Color3.fromRGB(225, 225, 235),
         Good = Color3.fromRGB(80, 220, 140),
         Work = Color3.fromRGB(255, 190, 70),
         Bad = Color3.fromRGB(240, 90, 90),
@@ -1814,7 +1719,8 @@ do
         { Path = { "__OBJECTS", "Machines", "RiftMachine", "Rift", "Meshes/VoidPortal_Cube.003" }, Offset = Vector3.new(-26.776, 1.75, 18.665) },
     }
 
-    local r1556, r1557, r1558 = 52, true, {}
+    local r1556, r1557 = 52, true
+    local r1558 = {}
     local r1559 = { AreaId = nil, SignalCarrying = false, WeldCarrying = false, Carrying = false, Active = false, Disguise = nil, FlashRequest = nil, FlashUntil = 0 }
 
     local function randName()
@@ -1842,7 +1748,7 @@ do
         if ok and t then t:Play() end
     end
 
-    -- ============== ANTI GUARD CORE ==============
+    local r11_47
     local r1584 = function()
         local root = r247.Root()
         if not root then return nil end
@@ -1858,7 +1764,6 @@ do
         end
         return nil
     end
-
     local r1585 = function(model, parent)
         local saved = {}
         for _, d in ipairs(model:GetDescendants()) do
@@ -1885,7 +1790,6 @@ do
         clone.Parent = parent
         return clone
     end
-
     local r1586 = function(char, offset)
         local cam = workspace.CurrentCamera
         if not char or not cam or r1559.Disguise then return end
@@ -1928,7 +1832,6 @@ do
             end
         end
     end
-
     local r1587 = function()
         local st = r1559.Disguise
         if not st then return end
@@ -1940,7 +1843,6 @@ do
         pcall(function() st.Camera.CameraType = st.CameraType end)
         for _, c in ipairs(st.Copies) do pcall(function() c:Destroy() end) end
     end
-
     local r1588 = function()
         for _, p in ipairs(r5_65) do
             local n = workspace
@@ -1949,7 +1851,6 @@ do
         end
         return Vector3.new(528.7, 70.57, -364.11)
     end
-
     local r1589 = function(char, root, pos, rot, freeze)
         local cf = CFrame.new(pos) * rot
         pcall(function() char:PivotTo(cf) end)
@@ -1959,7 +1860,6 @@ do
             if p:IsA("BasePart") then pcall(function() p.AssemblyLinearVelocity = Vector3.zero; p.AssemblyAngularVelocity = Vector3.zero end) end
         end
     end
-
     local function areaId()
         local id = r1559.AreaId
         if type(id) ~= "string" or id == "" then id = type(r247.Steal) == "table" and r247.Steal.CarryAreaId or nil end
@@ -1969,44 +1869,30 @@ do
         end
         return id
     end
-
     local function pickConfig()
         local ok, custom = pcall(function() return getgenv().OxioAntiGuard end)
         if ok and type(custom) == "table" then
             if type(custom.Steps) == "table" then return custom end
-            local s = custom.Default
-            if type(s) == "table" then return s end
+            if type(custom.Default) == "table" then return custom.Default end
         end
-        return r1552.Default
+        return {
+            Target = "line", LineOffset = 8, Height = 45, OffsetX = -90, OffsetZ = -35,
+            Jitter = 0, Point = false, Disguise = true, Limp = true, Facing = "Zero",
+            Freeze = false, StartAt = 0,
+            Steps = { { At = 0.1, To = "home" }, { At = 0.33, To = "home" }, { At = 0.56, To = "home" }, { At = 0.75, To = "start" } },
+            ReleaseAt = 0.8, WeldScanGap = 0.03, BusyLimit = 2.5,
+        }
     end
-
     local function randJitter(amount)
         if amount <= 0 then return 0 end
         return (math.random() * 2 - 1) * amount
     end
-
     local function buildSteps(cfg)
         local steps = type(cfg.Steps) == "table" and cfg.Steps or {}
         local release = tonumber(cfg.ReleaseAt) or 0
         local startAt = math.max(tonumber(cfg.StartAt) or 0, 0)
-        local startR = math.max(tonumber(cfg.StartRandom) or 0, 0)
-        local hopR = math.max(tonumber(cfg.HopRandom) or 0, 0)
-        local holdR = math.max(tonumber(cfg.HoldRandom) or 0, 0)
-        if startR <= 0 and hopR <= 0 and holdR <= 0 then return steps, release, startAt end
-        local t0 = math.max(startAt + randJitter(startR), 0)
-        local out = {}
-        local cursor = 0
-        local acc = 0
-        for i, s in ipairs(steps) do
-            if type(s) ~= "table" then break end
-            local at = math.max(tonumber(s.At) or 0, 0)
-            acc = math.max(acc + math.max(at - cursor, 0) + randJitter(s.To == "start" and holdR or hopR), t0)
-            out[i] = { At = acc, To = s.To, Glide = s.Glide }
-            cursor = at
-        end
-        return out, acc + math.max(release - cursor, 0), t0
+        return steps, release, startAt
     end
-
     local function linePoint(cfg, base)
         local w = workspace:FindFirstChild("World") or workspace:FindFirstChild("__OBJECTS")
         local areas = w and w:FindFirstChild("Areas")
@@ -2023,7 +1909,6 @@ do
         end
         return nil
     end
-
     local function targetPos(cfg, base)
         local kind = tostring(cfg.Target or "home")
         if kind == "sky" then return base end
@@ -2031,22 +1916,18 @@ do
         if kind == "line" then local lp = linePoint(cfg, base); if lp then return lp end end
         return r1588()
     end
-
     local function finalPos(cfg, base)
         return targetPos(cfg, base) + Vector3.new(tonumber(cfg.OffsetX) or 0, tonumber(cfg.Height) or 0, tonumber(cfg.OffsetZ) or 0)
     end
-
     local function reset()
         r1559.Active = false
         r1550.Busy = false
     end
-
     local function runSteal(session)
         local char = r232.Character
         local root = r247.Root()
         local hm = char and char:FindFirstChildOfClass("Humanoid")
         if not root or not hm or hm.Health <= 0 then reset(); r11_47(r1554.Bad, 1.6); return end
-
         local alive = function() return r1557 and root.Parent and hm.Parent and hm.Health > 0 end
         local hadStand = hm.PlatformStand
         local startCF = root.CFrame
@@ -2057,7 +1938,6 @@ do
         local facing = tostring(cfg.Facing or "Keep")
         local jitter = math.max(tonumber(cfg.Jitter) or 0, 0)
         local baseRot = facing == "Zero" and CFrame.new() or startCF.Rotation
-
         local function pickRot()
             if facing == "Spin" then return CFrame.Angles(0, math.rad(math.random(0, 359)), 0) end
             return baseRot
@@ -2067,7 +1947,6 @@ do
             return p + Vector3.new((math.random()*2-1)*jitter, 0, (math.random()*2-1)*jitter)
         end
         local jumpTarget = finalPos(cfg, startPos)
-
         local function sleep(untilTime)
             while alive() and os.clock() - session < untilTime do
                 r137.Heartbeat:Wait()
@@ -2082,11 +1961,8 @@ do
         end
         pcall(function() hm.BreakJointsOnDeath = false end)
         if cfg.Disguise ~= false then pcall(r1586, char, Vector3.zero) end
-
         r11_47(r1554.Work)
-
         if sleep(startAt) and cfg.Limp ~= false then hm.PlatformStand = true end
-
         local prev = startPos
         for _, step in ipairs(steps) do
             if type(step) ~= "table" then break end
@@ -2112,7 +1988,6 @@ do
         reset()
         if alive() and r1559.Carrying then r11_47(r1554.Good, 1.6) else r11_47(r1554.Bad, 1.6) end
     end
-
     local function safeRun(session)
         if not pcall(runSteal, session) then
             pcall(function()
@@ -2120,17 +1995,14 @@ do
                 local h = c and c:FindFirstChildOfClass("Humanoid")
                 if h then h.PlatformStand = false end
             end)
-            r1587(); reset()
-            r11_47(r1554.Bad, 1.6)
+            r1587(); reset(); r11_47(r1554.Bad, 1.6)
         end
     end
-
     local function hitArmExpired()
         if r1550.HitArms <= 0 then return false end
         if 25 < os.clock() - (r1550.HitArmedAt or 0) then r1550.HitArms = 0; return false end
         return true
     end
-
     local function updateCarry()
         local was = r1559.Carrying
         r1559.Carrying = r1559.SignalCarrying or r1559.WeldCarrying
@@ -2142,7 +2014,7 @@ do
         end
     end
 
-    -- ============== PANEL UI ==============
+    -- ===== UI =====
     local screen = newInst("ScreenGui", nil, {
         ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = -100,
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
@@ -2154,23 +2026,19 @@ do
         BackgroundTransparency = 1,
     })
     local frameScale = newInst("UIScale", frame, { Scale = 1 })
-
     local card = newInst("Frame", frame, {
         Size = UDim2.fromScale(1, 1),
         BackgroundColor3 = r1554.Card,
-        BorderSizePixel = 0,
-        Active = true,
+        BorderSizePixel = 0, Active = true,
     })
     newInst("UICorner", card, { CornerRadius = UDim.new(0, 14) })
     local cardScale = newInst("UIScale", card, { Scale = 0.86 })
     newInst("UIGradient", card, { Color = ColorSequence.new(r1554.CardTop, r1554.Card), Rotation = 90 })
-
     local cardStroke = newInst("UIStroke", card, {
         Thickness = 1.5, Color = Color3.fromRGB(255, 255, 255),
         Transparency = 0.2, ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
     })
     local strokeGrad = newInst("UIGradient", cardStroke, { Color = ColorSequence.new(r1554.Stroke, r1554.Stroke) })
-
     local iconBg = newInst("Frame", card, {
         AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 10, 0.5, 0),
         Size = UDim2.fromOffset(36, 36), BackgroundColor3 = Color3.fromRGB(28, 26, 32),
@@ -2178,7 +2046,6 @@ do
     })
     newInst("UICorner", iconBg, { CornerRadius = UDim.new(0, 11) })
     local iconStroke = newInst("UIStroke", iconBg, { Thickness = 1.5, Color = r1554.Off, ApplyStrokeMode = Enum.ApplyStrokeMode.Border })
-
     local icon = newInst("ImageLabel", iconBg, {
         AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
         Size = UDim2.fromScale(0.86, 0.86), BackgroundTransparency = 1,
@@ -2187,21 +2054,18 @@ do
     })
     newInst("UICorner", icon, { CornerRadius = UDim.new(0, 8) })
     local iconScale = newInst("UIScale", icon, { Scale = 1 })
-
     newInst("UIGradient", newInst("TextLabel", card, {
         BackgroundTransparency = 1, Position = UDim2.new(0, 56, 0, 7),
         Size = UDim2.new(1, -112, 0, 15), Font = Enum.Font.BuilderSansExtraBold,
         TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left,
         TextColor3 = Color3.fromRGB(255, 255, 255), Text = "Oxio Hub", ZIndex = 2,
     }), { Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(210, 210, 220)) })
-
     newInst("TextLabel", card, {
         BackgroundTransparency = 1, Position = UDim2.new(0, 56, 0, 22),
         Size = UDim2.new(1, -112, 0, 20), Font = Enum.Font.GothamBlack, TextSize = 15,
         TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = r1554.Text,
         Text = "Anti Guard", ZIndex = 2,
     })
-
     local toggle = newInst("TextButton", card, {
         AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0),
         Size = UDim2.fromOffset(42, 22), BackgroundColor3 = Color3.fromRGB(255, 255, 255),
@@ -2209,7 +2073,6 @@ do
     })
     newInst("UICorner", toggle, { CornerRadius = UDim.new(1, 0) })
     local toggleGrad = newInst("UIGradient", toggle, { Color = ColorSequence.new(r1554.Off, r1554.Off) })
-
     local knob = newInst("Frame", toggle, {
         AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0),
         Size = UDim2.fromOffset(16, 16), BackgroundColor3 = Color3.fromRGB(245, 245, 250),
@@ -2220,7 +2083,6 @@ do
     local function baseStroke()
         return r1550.Enabled and r1554.AccentA or r1554.Off
     end
-
     local function render(instant)
         local dur = instant and 0 or 0.28
         if r1550.Enabled then
@@ -2243,12 +2105,7 @@ do
         end
         if r1559.FlashUntil <= os.clock() then r230(iconStroke, dur, { Color = baseStroke() }) end
     end
-
-    local function flash(color, hold)
-        r1559.FlashRequest = { Color = color, Hold = hold }
-    end
-    local r11_47 = flash
-
+    r11_47 = function(color, hold) r1559.FlashRequest = { Color = color, Hold = hold } end
     local function processFlash()
         local req = r1559.FlashRequest
         if not req then return end
@@ -2263,7 +2120,6 @@ do
             end)
         end
     end
-
     local function setHandle(on)
         local h = r1550.Handle
         if type(h) ~= "table" then return end
@@ -2272,17 +2128,14 @@ do
             if ok and type(fn) == "function" and pcall(fn, h, on) then return end
         end
     end
-
     r1550.Render = render
 
-    -- Drag overlay
+    -- drag overlay
     local dragOverlay = newInst("TextButton", card, {
         Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
         AutoButtonColor = false, Text = "", ZIndex = 10, Active = false,
     })
-
     local dragging, dragged, dragStart, startPos, userPos, dragInput = false, false, Vector2.zero, nil, nil, nil
-
     local function onToggleClick()
         r1550.Enabled = not r1550.Enabled
         render(false)
@@ -2292,25 +2145,20 @@ do
             if r1557 then r230(iconScale, 0.3, { Scale = 1 }, Enum.EasingStyle.Back) end
         end)
     end
-
     r1558[#r1558+1] = dragOverlay.InputBegan:Connect(function(input)
         local t = input.UserInputType
         if t ~= Enum.UserInputType.MouseButton1 and t ~= Enum.UserInputType.Touch then return end
-        dragging = true
-        dragged = false
+        dragging = true; dragged = false
         dragStart = Vector2.new(input.Position.X, input.Position.Y)
         startPos = frame.Position
         dragInput = input
-
         input.Changed:Connect(function()
             if input.UserInputState ~= Enum.UserInputState.End then return end
-            dragging = false
-            dragInput = nil
+            dragging = false; dragInput = nil
             if not dragged then onToggleClick() end
             dragged = false
         end)
     end)
-
     r1558[#r1558+1] = r139.InputChanged:Connect(function(input)
         if not dragging or input ~= dragInput then return end
         local t = input.UserInputType
@@ -2324,7 +2172,6 @@ do
             userPos = np
         end
     end)
-
     local dragOrigSize = toggle.Size
     r1558[#r1558+1] = dragOverlay.MouseEnter:Connect(function()
         r230(toggle, 0.15, { Size = dragOrigSize + UDim2.fromOffset(2, 2) })
@@ -2333,12 +2180,11 @@ do
         r230(toggle, 0.15, { Size = dragOrigSize })
     end)
 
-    -- bottom auto-position watcher
+    -- auto-position
     local RAY_NAME = { Hotbar = true, HotBar = true, Toolbar = true, ToolBar = true, Backpack = true, Inventory = true }
     local monitored = {}
     local lastScan, lastPos = math.huge, math.huge
     local cachedBottom
-
     local function isVisible(node)
         while node do
             if node:IsA("GuiObject") and not node.Visible then return false end
@@ -2347,12 +2193,10 @@ do
         end
         return false
     end
-
     local function guiInsetY()
         local ok, v = pcall(function() return r164:GetGuiInset().Y end)
         return ok and v or 0
     end
-
     local function topOfContainer(inst)
         local top = nil
         for _, d in ipairs(inst:GetDescendants()) do
@@ -2363,7 +2207,6 @@ do
         end
         return top or inst.AbsolutePosition.Y
     end
-
     local function collect()
         table.clear(monitored)
         local pg = r232:FindFirstChildOfClass("PlayerGui")
@@ -2372,7 +2215,6 @@ do
             if d:IsA("GuiObject") and RAY_NAME[d.Name] then monitored[#monitored+1] = d end
         end
     end
-
     local function allBars()
         local out = {}
         pcall(function()
@@ -2384,8 +2226,7 @@ do
         for _, m in ipairs(monitored) do if m.Parent then out[#out+1] = m end end
         return out
     end
-
-    local function reposition(force)
+    local function reposition()
         local cam = workspace.CurrentCamera
         if not cam then return end
         local vp = cam.ViewportSize
@@ -2399,8 +2240,7 @@ do
             card.BackgroundTransparency = bgT
             iconBg.BackgroundTransparency = bgT
         end
-        if userPos and not force then frame.Position = userPos; return end
-
+        if userPos then frame.Position = userPos; return end
         local y = vp.Y - 8 * scale
         local found = false
         for _, m in ipairs(allBars()) do
@@ -2422,7 +2262,7 @@ do
         frame.Position = UDim2.new(0.5, 0, 0, finalY)
     end
 
-    -- Carry signal from game
+    -- carry signal
     do
         local st = r234.EggState
         local ev = type(st) == "table" and st.CarryChanged or nil
@@ -2442,7 +2282,7 @@ do
     local scanT = 0
     r1558[#r1558+1] = r137.Heartbeat:Connect(function(dt)
         local busy = r1550.Busy or r1559.Active
-        if busy and os.clock() - r1550.BusySince > math.max(tonumber(r1551.BusyLimit) or 2.5, (tonumber(r1551.ReleaseAt) or 0) + 1) then
+        if busy and os.clock() - r1550.BusySince > 2.5 then
             r1587()
             local c = r232.Character
             local h = c and c:FindFirstChildOfClass("Humanoid")
@@ -2459,7 +2299,6 @@ do
             updateCarry()
         end
     end)
-
     r1558[#r1558+1] = r137.RenderStepped:Connect(function(dt)
         processFlash()
         lastScan = lastScan + dt
@@ -2469,7 +2308,6 @@ do
     end)
 
     render(true)
-
     r1550.ShowPanel = function(on) screen.Enabled = on == true end
     screen.Enabled = r1550.PanelShown == true
     screen.Parent = r1561
@@ -2488,9 +2326,4 @@ end
 
 -- ============= FINALIZE =============
 r179:Finalize({ Window = r180, MainTab = r183, ShowMainTab = true })
-
-task.defer(function()
-    for _ = 1, 3 do r137:Heartbeat:Wait() end
-end)
-
 print("[Oxio] Loaded: Auto Steal + Anti Guard")
